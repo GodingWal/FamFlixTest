@@ -223,10 +223,10 @@ export default function VoiceCloningEnhanced() {
       const msg = String(error?.message || '');
       setPreviewError(msg || 'Unable to generate preview');
 
-      if (/ElevenLabs|voice cloning service|TTS/i.test(msg) && voice?.audioSampleUrl) {
+      if (/voice cloning service|TTS/i.test(msg) && voice?.audioSampleUrl) {
         toast({
           title: 'Voice service unavailable',
-          description: 'Set ELEVENLABS_API_KEY in your .env to enable audio previews. Playing a sample clip instead.',
+          description: 'Preview TTS unavailable; playing the voice sample instead.',
         });
         try {
           setPreviewAudioPath(voice.audioSampleUrl);

@@ -54,11 +54,6 @@ class HealthService {
     checks.push(fsHealth);
 
     // External API health checks
-    if (config.ELEVENLABS_API_KEY) {
-      const elevenLabsHealth = await this.checkElevenLabsAPI();
-      checks.push(elevenLabsHealth);
-    }
-
     if (config.OPENAI_API_KEY) {
       const openAIHealth = await this.checkOpenAI();
       checks.push(openAIHealth);
@@ -137,45 +132,7 @@ class HealthService {
     }
   }
 
-  private async checkElevenLabsAPI(): Promise<HealthCheck> {
-    try {
-      const startTime = Date.now();
-      const response = await fetch('https://api.elevenlabs.io/v1/voices', {
-        method: 'GET',
-        headers: {
-          'xi-api-key': config.ELEVENLABS_API_KEY!
-        },
-        signal: AbortSignal.timeout(5000) // 5 second timeout
-      });
-
-      const responseTime = Date.now() - startTime;
-
-      if (response.ok) {
-        return {
-          service: 'elevenlabs',
-          status: 'healthy',
-          responseTime,
-          details: {
-            endpoint: 'https://api.elevenlabs.io/v1/voices'
-          }
-        };
-      } else {
-        return {
-          service: 'elevenlabs',
-          status: 'degraded',
-          responseTime,
-          error: `HTTP ${response.status}: ${response.statusText}`
-        };
-      }
-    } catch (error) {
-      logger.error('ElevenLabs API health check failed:', error);
-      return {
-        service: 'elevenlabs',
-        status: 'unhealthy',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      };
-    }
-  }
+  // Removed ElevenLabs health check
 
   private async checkOpenAI(): Promise<HealthCheck> {
     try {

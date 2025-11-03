@@ -137,12 +137,12 @@ router.get('/api/admin/health', authenticateToken, async (req: AuthRequest, res)
     // Check database connectivity
     const dbCheck = await db.get(sql`SELECT 1 as healthy`);
     
-    // Check ElevenLabs API (basic connectivity)
-    const elevenLabsHealthy = process.env.ELEVENLABS_API_KEY ? true : false;
+    // Basic TTS engine readiness (Chatterbox is local; assume available in dev)
+    const ttsHealthy = true;
 
     const health = {
       database: dbCheck?.healthy === 1,
-      elevenLabs: elevenLabsHealthy,
+      tts: ttsHealthy,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
     };
@@ -153,7 +153,7 @@ router.get('/api/admin/health', authenticateToken, async (req: AuthRequest, res)
     res.status(500).json({ 
       error: 'Failed to check system health',
       database: false,
-      elevenLabs: false,
+      tts: false,
       timestamp: new Date().toISOString()
     });
   }

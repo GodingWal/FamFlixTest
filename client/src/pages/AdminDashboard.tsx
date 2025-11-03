@@ -69,7 +69,7 @@ type ManagedUser = {
 
 type SystemHealth = {
   database: boolean;
-  elevenLabs: boolean;
+  tts: boolean;
   timestamp: string;
   uptime: number;
 };
@@ -209,10 +209,10 @@ const AdminDashboard: React.FC = () => {
       description: 'Primary datastore connectivity',
     },
     {
-      key: 'elevenLabs',
-      label: 'ElevenLabs API',
-      healthy: systemHealth?.elevenLabs ?? false,
-      description: 'Voice cloning integration',
+      key: 'tts',
+      label: 'TTS Engine',
+      healthy: systemHealth?.tts ?? false,
+      description: 'Voice synthesis integration',
     },
   ];
 

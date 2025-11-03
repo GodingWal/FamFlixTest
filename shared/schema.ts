@@ -436,7 +436,7 @@ export const insertVideoSchema = createInsertSchema(videos).omit({
 });
 
 export const insertVoiceProfileSchema = createInsertSchema(voiceProfiles, {
-  provider: ttsProviderZEnum.default("ELEVENLABS"),
+  provider: ttsProviderZEnum.default("CHATTERBOX"),
 }).omit({
   id: true,
   createdAt: true,

@@ -519,8 +519,8 @@ export default function VoiceCloning() {
       // If recording is complete, combine all audio chunks into a single file
       const audioToSend = audioFile || await createCombinedAudioFile();
       
-      // Validate audio quality for ElevenLabs
-      const validationResult = await validateAudioForElevenLabs(audioToSend);
+      // Validate audio quality for cloning
+      const validationResult = await validateAudioForCloning(audioToSend);
       if (!validationResult.isValid) {
         toast({
           title: "Audio quality issue",
@@ -549,7 +549,7 @@ export default function VoiceCloning() {
     }
   };
 
-  const validateAudioForElevenLabs = async (audioFile: File): Promise<{
+  const validateAudioForCloning = async (audioFile: File): Promise<{
     isValid: boolean;
     message: string;
     warnings: string[];
@@ -576,7 +576,7 @@ export default function VoiceCloning() {
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
       
-      // Check duration (ElevenLabs recommends 10-30 minutes, but shorter is acceptable)
+      // Check duration (longer samples generally produce better clones; shorter is acceptable)
       const duration = audioBuffer.duration;
       if (duration < 5) {
         warnings.push("Short audio detected. Longer recordings (30+ seconds) typically produce better voice clones.");
@@ -692,11 +692,11 @@ export default function VoiceCloning() {
 
   const audioBufferToBlob = (audioBuffer: AudioBuffer): Promise<Blob> => {
     return new Promise((resolve) => {
-      // Optimize for ElevenLabs: use 44.1kHz sample rate and higher bit depth
+      // Encode to standard WAV: use 44.1kHz sample rate and higher bit depth
       const targetSampleRate = 44100;
       const numberOfChannels = 1; // Mono for voice cloning
       const format = 1; // PCM
-      const bitDepth = 24; // Higher quality for ElevenLabs
+      const bitDepth = 24; // Higher quality for downstream processing
       
       // Resample to 44.1kHz if needed
       let processedBuffer = audioBuffer;

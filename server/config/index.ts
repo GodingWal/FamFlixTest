@@ -18,16 +18,7 @@ const configSchema = z.object({
   
   // API Keys
   OPENAI_API_KEY: z.string().optional(),
-  ELEVENLABS_API_KEY: z.string().optional(),
-  ELEVENLABS_TTS_MODEL: z.string().optional(),
-  ELEVENLABS_OPT_STABILITY: z
-    .string()
-    .optional()
-    .transform((val) => (val === undefined || val === "" ? undefined : Number(val))),
-  ELEVENLABS_OPT_SIMILARITY_BOOST: z
-    .string()
-    .optional()
-    .transform((val) => (val === undefined || val === "" ? undefined : Number(val))),
+  
 
   // Rate Limiting
   RATE_LIMIT_WINDOW_MS: z.string().transform(Number).default("900000"),
@@ -47,7 +38,7 @@ const configSchema = z.object({
   CLIENT_URL: z.string().default("http://localhost:5000"),
   FEATURE_STORY_MODE: z.string().transform((val) => val === "true").default("false"),
   TTS_PROVIDER: z
-    .enum(["CHATTERBOX", "ELEVENLABS", "PLAYHT", "AZURE", "COQUI", "MOCK"] as const)
+    .enum(["CHATTERBOX", "PLAYHT", "AZURE", "COQUI", "MOCK"] as const)
     .default("CHATTERBOX"),
   STORY_AUDIO_PREFIX: z.string().default("stories"),
 

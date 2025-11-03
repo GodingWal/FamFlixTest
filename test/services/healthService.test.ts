@@ -11,7 +11,6 @@ vi.mock('../../server/db/connection', () => ({
 vi.mock('../../server/config', () => ({
   config: {
     UPLOAD_DIR: 'test-uploads',
-    ELEVENLABS_API_KEY: 'test-key',
     OPENAI_API_KEY: 'test-key',
     NODE_ENV: 'test',
   },
@@ -87,23 +86,18 @@ describe('HealthService', () => {
           ok: true,
           status: 200,
           statusText: 'OK',
-        } as Response)
-        .mockResolvedValueOnce({
-          ok: true,
-          status: 200,
-          statusText: 'OK',
         } as Response);
 
       const result = await healthService.getSystemHealth();
 
       expect(result.status).toBe('healthy');
-      expect(result.checks).toHaveLength(4); // database, filesystem, elevenlabs, openai
+      expect(result.checks).toHaveLength(3); // database, filesystem, openai
       expect(result.system).toBeDefined();
       expect(result.uptime).toBeGreaterThan(0);
       expect(result.timestamp).toBeDefined();
     });
 
-    it('should return unhealthy status when multiple external services fail', async () => {
+    it('should return degraded status when external service fails', async () => {
       // Mock database as healthy
       const { checkDatabaseHealth } = await import('../../server/db/connection');
       vi.mocked(checkDatabaseHealth).mockResolvedValue({
@@ -113,12 +107,11 @@ describe('HealthService', () => {
 
       // Mock external APIs as failing
       global.fetch = vi.fn()
-        .mockRejectedValueOnce(new Error('API Error'))
         .mockRejectedValueOnce(new Error('API Error'));
 
       const result = await healthService.getSystemHealth();
 
-      expect(result.status).toBe('unhealthy');
+      expect(result.status).toBe('degraded');
       expect(result.checks.some(check => check.status === 'unhealthy')).toBe(true);
     });
 

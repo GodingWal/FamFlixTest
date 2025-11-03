@@ -240,7 +240,7 @@ class VoiceJobService {
 
   private async processVoiceCloning(job: VoiceJobData, audioFiles: Buffer[]) {
     try {
-      logger.info('Processing voice cloning with ElevenLabs Instant Voice Cloning API', {
+      logger.info('Processing voice cloning with Chatterbox TTS', {
         jobId: job.id,
         audioFileCount: audioFiles.length
       });
@@ -266,7 +266,7 @@ class VoiceJobService {
       logger.info('Voice clone created successfully', {
         jobId: job.id,
         voiceProfileId,
-        elevenlabsVoiceId: voiceProfile.modelId
+        modelId: voiceProfile.modelId
       });
       
       return {
@@ -282,7 +282,7 @@ class VoiceJobService {
       
       // Provide specific error messages based on the error type
       if (error instanceof Error) {
-        if (error.message.includes('ElevenLabs')) {
+        if (error.message.includes('TTS') || error.message.includes('voice cloning')) {
           throw new Error('Voice cloning service error: Please try again later');
         } else if (error.message.includes('quality')) {
           throw new Error('Audio quality insufficient: Please record with clearer audio');

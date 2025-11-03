@@ -203,34 +203,7 @@ export class VoiceService {
     }
   }
 
-  private async preprocessAudioForElevenLabs(audioBuffer: Buffer): Promise<Buffer> {
-    try {
-      console.log(`Preprocessing audio: ${audioBuffer.length} bytes`);
-
-      let workingBuffer = audioBuffer;
-
-      if (!this.isWavBuffer(workingBuffer)) {
-        console.log('Wrapping raw audio data in WAV container');
-        workingBuffer = this.wrapRawAudioAsWav(workingBuffer);
-      }
-
-      let audioInfo = await this.analyzeAudioBuffer(workingBuffer);
-
-      // Normalize the format so every clip matches ElevenLabs guidance
-      workingBuffer = await this.convertToOptimalFormat(workingBuffer, audioInfo);
-      audioInfo = await this.analyzeAudioBuffer(workingBuffer);
-
-      // Apply denoising and gentle filtering
-      workingBuffer = await this.enhanceAudioQuality(workingBuffer, audioInfo);
-
-      return workingBuffer;
-
-    } catch (error) {
-      console.error('Audio preprocessing error:', error);
-      console.log('Falling back to original audio format');
-      return audioBuffer;
-    }
-  }
+  
 
   private isWavBuffer(buffer: Buffer): boolean {
     return (
@@ -896,6 +869,19 @@ export class VoiceService {
     const profile = await storage.getVoiceProfile(profileId);
     if (!profile) {
       throw new Error("Voice profile not found");
+    }
+
+    // Attempt to remove associated files (best-effort)
+    try {
+      if (profile.providerRef) {
+        await fs.unlink(profile.providerRef).catch(() => {});
+      }
+      if (profile.audioSampleUrl && profile.audioSampleUrl.startsWith('/uploads/')) {
+        const samplePath = path.join(process.cwd(), profile.audioSampleUrl.replace(/^\/+/, ''));
+        await fs.unlink(samplePath).catch(() => {});
+      }
+    } catch (e) {
+      // Ignore file deletion errors
     }
 
     await storage.deleteVoiceProfile(profileId);

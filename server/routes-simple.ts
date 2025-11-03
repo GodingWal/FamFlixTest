@@ -583,6 +583,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Delete a voice profile (owner only)
+  app.delete('/api/voice-profiles/:profileId', authenticateToken, async (req: AuthRequest, res) => {
+    try {
+      const { profileId } = req.params;
+      const profile = await storage.getVoiceProfile(profileId);
+      if (!profile) {
+        return res.status(404).json({ error: 'Voice profile not found' });
+      }
+
+      if (profile.userId !== req.user!.id) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+
+      await voiceService.deleteVoiceProfile(profileId);
+      res.json({ message: 'Voice profile deleted successfully' });
+    } catch (error: any) {
+      console.error('Delete voice profile error:', error);
+      res.status(400).json({ error: error.message || 'Failed to delete voice profile' });
+    }
+  });
+
   // Voice preview: short kids story (~20s) + TTS using selected voice
   app.post('/api/voice-profiles/:profileId/preview', authenticateToken, async (req: AuthRequest, res) => {
     try {
