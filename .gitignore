@@ -1,0 +1,28 @@
+node_modules
+dist
+.DS_Store
+server/public
+vite.config.ts.*
+*.tar.gz
+
+# Local environment and data
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
+famflix.db
+famflix.test.db
+uploads/
+
+# Python virtual environment
+.venv/
+
+# Transient build/test artifacts
+temp/
+logs/
+coverage/
+
+# IDE settings
+.vscode/
+.idea/
