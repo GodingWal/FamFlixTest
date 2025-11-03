@@ -314,44 +314,73 @@ export class VoiceService {
     };
   }
 
-  private async convertToOptimalFormat(buffer: Buffer, audioInfo: any): Promise<Buffer> {
-    // Target format for ElevenLabs:
-    const targetSampleRate = 44100; // 44.1kHz - standard CD quality
-    const targetChannels = 1; // Mono for voice cloning
-    const targetBitDepth = 16; // 16-bit PCM is broadly supported by ElevenLabs
+  private async convertToTargetFormat(
+    buffer: Buffer,
+    audioInfo: {
+      sampleRate: number;
+      channels: number;
+      bitDepth: number;
+      format?: string;
+      dataOffset?: number;
+      dataSize?: number;
+    },
+    targetSampleRate: number,
+    targetChannels: number,
+    targetBitDepth: number,
+  ): Promise<Buffer> {
+    const normalizedChannels = Math.max(1, Number.isFinite(targetChannels) ? Math.floor(targetChannels) : 1);
+    const normalizedBitDepth = targetBitDepth === 24 ? 24 : 16;
 
-    // If audio is already in optimal format, return as-is
-    if (audioInfo.sampleRate === targetSampleRate && 
-        audioInfo.channels === targetChannels && 
-        audioInfo.bitDepth === targetBitDepth) {
-      console.log('Audio already in optimal format');
+    if (
+      audioInfo.sampleRate === targetSampleRate &&
+      audioInfo.channels === normalizedChannels &&
+      audioInfo.bitDepth === normalizedBitDepth
+    ) {
       return buffer;
     }
 
-    console.log(`Converting audio: ${audioInfo.sampleRate}Hz → ${targetSampleRate}Hz, ${audioInfo.channels}ch → ${targetChannels}ch, ${audioInfo.bitDepth}bit → ${targetBitDepth}bit`);
+    console.log(
+      `Converting audio: ${audioInfo.sampleRate}Hz → ${targetSampleRate}Hz, ${audioInfo.channels}ch → ${normalizedChannels}ch, ${audioInfo.bitDepth}bit → ${normalizedBitDepth}bit`,
+    );
 
-    // Extract audio data (skip WAV header)
     const dataStart = (audioInfo as any).dataOffset ?? 44;
-    const dataEnd = dataStart + ((audioInfo as any).dataSize ?? Math.max(0, buffer.length - 44));
+    const dataEnd = dataStart + ((audioInfo as any).dataSize ?? Math.max(0, buffer.length - dataStart));
     const safeEnd = Math.min(buffer.length, dataEnd);
     const audioData = buffer.slice(dataStart, safeEnd);
-    const inputSamples = this.extractSamples(audioData, audioInfo);
-    
-    // Apply conversions
-    let processedSamples = inputSamples;
+    let processedSamples = this.extractSamples(audioData, audioInfo);
 
-    // Convert to mono if stereo
-    if (audioInfo.channels > 1) {
-      processedSamples = this.convertToMono(processedSamples, audioInfo.channels);
+    if (audioInfo.channels !== normalizedChannels) {
+      if (normalizedChannels === 1) {
+        processedSamples = this.convertToMono(processedSamples, audioInfo.channels);
+      } else {
+        const baseSamples = audioInfo.channels === 1 ? processedSamples : this.convertToMono(processedSamples, audioInfo.channels);
+        processedSamples = this.duplicateChannels(baseSamples, normalizedChannels);
+      }
     }
 
-    // Resample if needed
     if (audioInfo.sampleRate !== targetSampleRate) {
       processedSamples = this.resampleAudio(processedSamples, audioInfo.sampleRate, targetSampleRate);
     }
 
-    // Create new WAV buffer with optimal format
-    return this.createWavBuffer(processedSamples, targetSampleRate, targetChannels, targetBitDepth);
+    return this.createWavBuffer(processedSamples, targetSampleRate, normalizedChannels, normalizedBitDepth);
+  }
+
+  private async convertToOptimalFormat(buffer: Buffer, audioInfo: any): Promise<Buffer> {
+    return this.convertToTargetFormat(buffer, audioInfo, 44100, 1, 16);
+  }
+
+  private duplicateChannels(samples: number[], channels: number): number[] {
+    if (channels <= 1) return samples;
+
+    const duplicated = new Array<number>(samples.length * channels);
+    let offset = 0;
+    for (const sample of samples) {
+      for (let c = 0; c < channels; c++) {
+        duplicated[offset++] = sample;
+      }
+    }
+
+    return duplicated;
   }
 
   private extractSamples(audioData: Buffer, audioInfo: any): number[] {
@@ -616,7 +645,13 @@ export class VoiceService {
         info.channels !== referenceInfo.channels ||
         info.bitDepth !== referenceInfo.bitDepth
       ) {
-        buffer = await this.convertToOptimalFormat(buffer, info);
+        buffer = await this.convertToTargetFormat(
+          buffer,
+          info,
+          referenceInfo.sampleRate,
+          referenceInfo.channels,
+          referenceInfo.bitDepth,
+        );
         info = await this.analyzeAudioBuffer(buffer);
 
         if (index === 0) {
