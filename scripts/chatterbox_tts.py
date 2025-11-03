@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Chatterbox TTS CLI")
     parser.add_argument("--text", required=True, help="Text to synthesize")
     parser.add_argument("--out", required=True, type=Path, help="Output WAV path")
-    parser.add_argument("--audio-prompt", dest="audio_prompt", type=Path, help="Optional reference voice WAV path")
+    parser.add_argument("--speaker-wav", dest="speaker_wav", type=Path, help="Reference voice WAV path for cloning")
     parser.add_argument("--device", default="cpu", help="torch device: cpu or cuda")
     parser.add_argument("--language", default="en", help="Language id for multilingual model (e.g. en, fr, zh)")
     parser.add_argument("--multilingual", action="store_true", help="Use multilingual model")
@@ -65,17 +65,17 @@ def main(argv: list[str] | None = None) -> int:
     normalized_prompt_path: str | None = None
     prompt_wav = None
     prompt_sr = None
-    if args.audio_prompt:
-        ap = Path(args.audio_prompt)
-        if not ap.exists():
+    if args.speaker_wav:
+        speaker_wav_path = Path(args.speaker_wav)
+        if not speaker_wav_path.exists():
             print(json.dumps({
-                "error": f"Audio prompt not found: {ap}"
+                "error": f"Speaker WAV not found: {speaker_wav_path}"
             }), file=sys.stdout, flush=True)
             return 3
 
         # Load prompt
         try:
-            wav_in, sr_in = ta.load(str(ap))
+            wav_in, sr_in = ta.load(str(speaker_wav_path))
             # Convert to mono if needed
             if wav_in.dim() == 2 and wav_in.size(0) > 1:
                 wav_in = wav_in.mean(dim=0, keepdim=True)
@@ -95,7 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             prompt_wav, prompt_sr = wav_in, sr_in
         except Exception:
             # If torchaudio cannot decode, fall back to raw path
-            normalized_prompt_path = str(ap)
+            normalized_prompt_path = str(speaker_wav_path)
 
     # Introspect generate() signature to pass only supported kwargs
     sig = inspect.signature(model.generate)
@@ -123,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Candidates to try with string path
     path_candidates = [
+        "speaker_wav",
         "audio_prompt_path",
         "prompt_path",
         "voice_prompt_path",
@@ -136,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     ]
     # Candidates to try with waveform tensor
     tensor_candidates = [
+        "speaker_wav",
         "audio_prompt",
         "voice_prompt",
         "reference_audio",
@@ -200,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     sr = getattr(model, "sr", 22050)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    ta.save(str(args.out), wav, sr)
+    ta.save(str(args.out), wav, sr, format="wav")
 
     # Duration in seconds from samples length
     try:
