@@ -757,7 +757,7 @@ export class VoiceService {
         throw new Error("Voice profile is missing an audio prompt reference for Chatterbox");
       }
 
-      args.push("--audio-prompt", providerRef);
+      args.push("--speaker-wav", providerRef);
       if (config.CHATTERBOX_DEVICE) args.push("--device", String(config.CHATTERBOX_DEVICE));
       if (config.CHATTERBOX_MULTILINGUAL) args.push("--multilingual");
       if (config.CHATTERBOX_LANGUAGE_ID) args.push("--language", String(config.CHATTERBOX_LANGUAGE_ID));
