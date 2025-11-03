@@ -17,12 +17,47 @@ export class VoiceService {
     this.ensureStorageDirectory();
   }
 
+  // Decode arbitrary audio (MP3/OGG/M4A/WAV/etc.) into PCM WAV using ffmpeg via stdin/stdout
+  private async decodeAudioToWav(input: Buffer, targetSampleRate = 24000, targetChannels = 1, targetBitDepth = 16): Promise<Buffer> {
+    return new Promise<Buffer>((resolve, reject) => {
+      const args = [
+        '-hide_banner',
+        '-loglevel', 'error',
+        '-i', 'pipe:0',
+        '-vn', '-sn', '-dn',
+        '-ac', String(Math.max(1, targetChannels)),
+        '-ar', String(targetSampleRate),
+        '-f', 'wav',
+        ...(targetBitDepth === 24 ? ['-acodec', 'pcm_s24le'] : ['-acodec', 'pcm_s16le']),
+        'pipe:1',
+      ];
+      const proc = spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      const chunks: Buffer[] = [];
+      let err = '';
+      proc.stdout.on('data', (d: Buffer) => chunks.push(d));
+      proc.stderr.on('data', (d: Buffer) => { err += d.toString(); });
+      proc.on('error', (e: Error) => reject(e));
+      proc.on('close', (code: number | null) => {
+        if (code === 0) return resolve(Buffer.concat(chunks));
+        reject(new Error(`ffmpeg decode failed with code ${code}: ${err}`));
+      });
+      proc.stdin.write(input);
+      proc.stdin.end();
+    });
+  }
+
   // Minimal prompt preprocessing for Chatterbox: keep identity, standardize container/format
   private async preprocessChatterboxPrompt(audioBuffer: Buffer): Promise<Buffer> {
     try {
       let workingBuffer = audioBuffer;
+      // Properly decode non-WAV uploads (e.g., MP3/OGG/M4A) using ffmpeg; do NOT wrap raw bytes
       if (!this.isWavBuffer(workingBuffer)) {
-        workingBuffer = this.wrapRawAudioAsWav(workingBuffer);
+        try {
+          workingBuffer = await this.decodeAudioToWav(workingBuffer, 24000, 1, 16);
+        } catch (e) {
+          console.error('FFmpeg decode failed; falling back to raw WAV wrapper (may cause noise):', e);
+          workingBuffer = this.wrapRawAudioAsWav(workingBuffer);
+        }
       }
 
       let audioInfo = await this.analyzeAudioBuffer(workingBuffer);
@@ -44,7 +79,7 @@ export class VoiceService {
       // Light normalization only (no denoise / HPF to preserve timbre)
       try {
         const dataStart = (audioInfo as any).dataOffset ?? 44;
-        const dataEnd = dataStart + ((audioInfo as any).dataSize ?? Math.max(0, workingBuffer.length - 44));
+        const dataEnd = dataStart + ((audioInfo as any).dataSize ?? Math.max(0, workingBuffer.length - dataStart));
         const safeEnd = Math.min(workingBuffer.length, dataEnd);
         const audioData = workingBuffer.slice(dataStart, safeEnd);
         const samples = this.extractSamples(audioData, audioInfo);
@@ -78,20 +113,21 @@ export class VoiceService {
 
       const metaList = Array.isArray(recordingMetadata) ? recordingMetadata : [];
 
-      // Determine durations, falling back to analyzing the audio buffer when metadata is missing
+      // Determine durations, falling back to analyzing a safe, temporary WAV view when needed
       const augmentedFiles: Array<{ buffer: Buffer; metadata?: any; duration: number }> = [];
       for (let i = 0; i < audioFiles.length; i++) {
-        let buffer = audioFiles[i];
+        const originalBuffer = audioFiles[i];
         const metadata = metaList[i];
         let duration: number | undefined = typeof metadata?.duration === 'number' ? metadata.duration : undefined;
 
         try {
-          // Ensure analyzable WAV container when needed
-          if (!this.isWavBuffer(buffer)) {
-            buffer = this.wrapRawAudioAsWav(buffer);
+          // Use a separate buffer for analysis so we never mutate the original recording bytes
+          let analysisBuffer = originalBuffer;
+          if (!this.isWavBuffer(analysisBuffer)) {
+            analysisBuffer = this.wrapRawAudioAsWav(analysisBuffer);
           }
           if (duration === undefined) {
-            const info = await this.analyzeAudioBuffer(buffer);
+            const info = await this.analyzeAudioBuffer(analysisBuffer);
             duration = info.duration;
             console.log(`[voice] analyzed input #${i}: ${info.format} ${info.channels}ch @ ${info.sampleRate}Hz, ${info.bitDepth}bit, duration=${duration?.toFixed?.(2) ?? duration}s`);
           }
@@ -101,12 +137,13 @@ export class VoiceService {
 
         // Fallback rough estimate if analysis failed: assume 24kHz mono float32 (~96kB/sec)
         if (!Number.isFinite(duration as number)) {
-          const est = Math.max(0, Math.round((buffer.length / 96000) * 100) / 100);
+          const est = Math.max(0, Math.round((originalBuffer.length / 96000) * 100) / 100);
           duration = est;
-          console.warn(`[voice] duration analysis failed for input #${i}; using size-based estimate ~${est}s from ${buffer.length} bytes`);
+          console.warn(`[voice] duration analysis failed for input #${i}; using size-based estimate ~${est}s from ${originalBuffer.length} bytes`);
         }
 
-        augmentedFiles.push({ buffer, metadata, duration: Number(duration) });
+        // Always push the ORIGINAL buffer so downstream preprocessing can properly decode (e.g., webm/mp3 -> WAV)
+        augmentedFiles.push({ buffer: originalBuffer, metadata, duration: Number(duration) });
       }
 
       const validAudioFiles = augmentedFiles.filter(({ duration }) => duration >= 3);
