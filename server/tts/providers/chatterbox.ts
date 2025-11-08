@@ -43,7 +43,7 @@ export class ChatterboxProvider implements ITTSProvider {
       text,
       "--out",
       outFile,
-      "--audio-prompt",
+      "--speaker-wav",
       absPrompt,
     ];
 
@@ -75,7 +75,36 @@ export class ChatterboxProvider implements ITTSProvider {
       throw new Error(`Chatterbox CLI returned invalid output: ${String(err)}`);
     }
 
-    // Upload to S3
+    // If S3 is not configured, fall back to serving from local temp via /api/audio/:filename
+    if (!config.S3_BUCKET) {
+      const filename = path.basename(outFile);
+      // Compute checksum locally
+      const localHash = createHash("md5");
+      try {
+        await pipeline(
+          fs.createReadStream(outFile),
+          new Transform({
+            transform(chunk: Buffer, _enc: BufferEncoding, cb: (err?: Error | null, data?: unknown) => void) {
+              localHash.update(chunk);
+              cb(null, chunk);
+            },
+          }),
+          new PassThrough() // drain
+        );
+      } catch {
+        // ignore checksum errors; leave hash empty
+      }
+
+      return {
+        key: filename,
+        url: `/api/audio/${filename}`,
+        checksum: localHash.digest("hex"),
+        durationSec: typeof payload?.duration_sec === "number" ? payload.duration_sec : undefined,
+        transcript: undefined,
+      } satisfies TTSResult;
+    }
+
+    // Upload to S3 (default path)
     const keyBase = config.STORY_AUDIO_PREFIX.replace(/\/$/, "");
     const s3Key = `${keyBase}/raw/${Date.now()}-cb-${nanoid(6)}.wav`;
 
@@ -97,7 +126,7 @@ export class ChatterboxProvider implements ITTSProvider {
 
     const { url } = await uploadPromise;
 
-    // Optionally clean up temp file
+    // Optionally clean up temp file after successful upload
     try { await fsp.unlink(outFile); } catch (e) {
       // ignore cleanup errors
     }

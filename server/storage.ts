@@ -101,6 +101,7 @@ export interface IStorage {
     updates: Partial<InsertStoryAudio> & { status: StoryJobStatus }
   ): Promise<StoryAudio>;
   getStoryAudioForVoice(storyId: string, voiceId: string): Promise<StoryAudio[]>;
+  getStoryAudioByAudioUrl(audioUrl: string): Promise<StoryAudio | undefined>;
 
   // Story narration management
   createStoryNarration(narration: InsertStoryNarration): Promise<StoryNarration>;
@@ -748,6 +749,15 @@ export class DatabaseStorage implements IStorage {
       .orderBy(storySections.sectionIndex);
 
     return rows.map(({ audio }: { audio: StoryAudio }) => audio);
+  }
+
+  async getStoryAudioByAudioUrl(audioUrl: string): Promise<StoryAudio | undefined> {
+    const rows = await db
+      .select()
+      .from(storyAudio)
+      .where(eq(storyAudio.audioUrl, audioUrl))
+      .limit(1);
+    return rows[0] || undefined;
   }
 
   async createStoryNarration(insertNarration: InsertStoryNarration): Promise<StoryNarration> {
