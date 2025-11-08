@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigation } from "@/components/Navigation";
 import AdBanner from "@/components/AdBanner";
@@ -223,6 +223,9 @@ export default function Stories() {
   const [categoryFilter, setCategoryFilter] = useState<string>("ALL");
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null);
   const [jobStatus, setJobStatus] = useState<StoryJobStatus | null>(null);
+  const [isPlayAll, setIsPlayAll] = useState(false);
+  const [playIndex, setPlayIndex] = useState<number>(0);
+  const playAllAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const {
     data: storiesResponse,
@@ -408,6 +411,63 @@ export default function Stories() {
       audio: section.audio ?? audioLookup.get(section.id) ?? EMPTY_AUDIO_ENTRY,
     }));
   }, [storyDetail, storyAudioData]);
+
+  const playableSections = useMemo(
+    () => mergedSections.filter((s) => Boolean(s.audio?.audioUrl)),
+    [mergedSections]
+  );
+
+  // Reset "Play All" when story or voice changes
+  useEffect(() => {
+    setIsPlayAll(false);
+    setPlayIndex(0);
+    if (playAllAudioRef.current) {
+      playAllAudioRef.current.pause();
+      playAllAudioRef.current.src = "";
+    }
+  }, [selectedSlug, selectedVoiceProfile]);
+
+  // When Play All is toggled on, (re)start from current playIndex
+  useEffect(() => {
+    const audioEl = playAllAudioRef.current;
+    if (!audioEl) return;
+    if (!isPlayAll) return;
+    const current = playableSections[playIndex];
+    if (!current?.audio?.audioUrl) return;
+    if (audioEl.src !== new URL(current.audio.audioUrl, window.location.origin).toString()) {
+      audioEl.src = current.audio.audioUrl;
+    }
+    audioEl.play().catch(() => {
+      // Autoplay might be blocked; keep controls visible for manual play
+    });
+  }, [isPlayAll, playIndex, playableSections]);
+
+  const nextSection = () => {
+    setPlayIndex((idx) => {
+      const next = idx + 1;
+      if (next >= playableSections.length) {
+        setIsPlayAll(false);
+        return idx;
+      }
+      return next;
+    });
+  };
+
+  const prevSection = () => {
+    setPlayIndex((idx) => Math.max(0, idx - 1));
+  };
+
+  const handlePlayAllToggle = () => {
+    if (playableSections.length === 0) return;
+    if (!isPlayAll) {
+      // Start from first incomplete or current index
+      setPlayIndex((idx) => (idx < playableSections.length ? idx : 0));
+      setIsPlayAll(true);
+    } else {
+      setIsPlayAll(false);
+      playAllAudioRef.current?.pause();
+    }
+  };
 
   const requestNarration = useMutation<ReadResponse, unknown, { force?: boolean }>({
     mutationFn: async ({ force }) => {
@@ -764,6 +824,79 @@ export default function Stories() {
                         </div>
 
                         <div className="flex flex-wrap items-center gap-3">
+                          {/* Full Story Player */}
+                          <div className="w-full rounded-md border border-border bg-card p-3 md:w-auto md:flex md:items-center md:gap-3">
+                            <div className="flex items-center gap-2">
+                              <Button
+                                size="sm"
+                                variant={isPlayAll ? "secondary" : "default"}
+                                onClick={handlePlayAllToggle}
+                                disabled={playableSections.length === 0}
+                              >
+                                {isPlayAll ? (
+                                  <span className="flex items-center gap-2">
+                                    <i className="fas fa-pause" /> Pause All
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-2">
+                                    <i className="fas fa-play" /> Play All
+                                  </span>
+                                )}
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={prevSection}
+                                disabled={playableSections.length === 0 || playIndex === 0}
+                              >
+                                <i className="fas fa-backward" />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={nextSection}
+                                disabled={playableSections.length === 0 || playIndex >= playableSections.length - 1}
+                              >
+                                <i className="fas fa-forward" />
+                              </Button>
+                            </div>
+                            <div className="mt-2 text-xs text-muted-foreground md:mt-0 md:ml-3">
+                              {playableSections.length > 0 ? (
+                                <span>
+                                  Section {Math.min(playIndex + 1, playableSections.length)} / {playableSections.length}
+                                </span>
+                              ) : (
+                                <span>No generated audio yet</span>
+                              )}
+                            </div>
+                            {/* Hidden but usable audio element for Play All */}
+                            <audio
+                              ref={playAllAudioRef}
+                              className="mt-2 w-full md:hidden"
+                              controls
+                              preload="none"
+                              onEnded={nextSection}
+                              onError={nextSection}
+                            />
+                            {/* Download full story */}
+                            <div className="mt-2 md:mt-0 md:ml-3">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                asChild
+                                disabled={!selectedSlug || !selectedVoiceProfile || playableSections.length === 0}
+                              >
+                                <a
+                                  href={`/api/stories/${selectedSlug}/download/full?voiceId=${encodeURIComponent(
+                                    selectedVoiceProfile ?? ''
+                                  )}`}
+                                >
+                                  <i className="fas fa-download mr-2" /> Download All
+                                </a>
+                              </Button>
+                            </div>
+                          </div>
+
                           <Button
                             onClick={() => handleNarrate(false)}
                             disabled={Boolean(
@@ -904,6 +1037,19 @@ export default function Stories() {
                                           <p className="text-xs text-slate-400">
                                             Audio will appear here once generation completes.
                                           </p>
+                                        )}
+                                        {section.audio.audioUrl && (
+                                          <div className="pt-1">
+                                            <Button size="sm" variant="outline" asChild>
+                                              <a
+                                                href={`/api/stories/${selectedStorySummary?.slug}/download/section/${section.id}?voiceId=${encodeURIComponent(
+                                                  selectedVoiceProfile ?? ''
+                                                )}`}
+                                              >
+                                                <i className="fas fa-download mr-2" /> Download Section
+                                              </a>
+                                            </Button>
+                                          </div>
                                         )}
                                       </div>
                                     );

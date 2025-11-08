@@ -18,6 +18,7 @@ uploads/
 
 # Python virtual environment
 .venv/
+.venv311/
 
 # Transient build/test artifacts
 temp/
