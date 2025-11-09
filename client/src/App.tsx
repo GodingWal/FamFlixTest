@@ -21,6 +21,7 @@ const VideoDetails = lazy(() => import("@/pages/VideoDetails"));
 const Profile = lazy(() => import("@/pages/Profile"));
 const Settings = lazy(() => import("@/pages/Settings"));
 const Stories = lazy(() => import("@/pages/Stories"));
+const CreateStory = lazy(() => import("@/pages/CreateStory"));
 const Pricing = lazy(() => import("@/pages/Pricing"));
 const Privacy = lazy(() => import("@/pages/Privacy"));
 const Terms = lazy(() => import("@/pages/Terms"));
@@ -54,6 +55,7 @@ function Router() {
                  <Route path="/admin/upload-templates" component={AdminTemplateUpload} />
           <Route path="/voice-cloning" component={VoiceCloning} />
           <Route path="/stories" component={Stories} />
+          <Route path="/stories/create" component={CreateStory} />
           <Route path="/pricing" component={Pricing} />
           <Route path="/profile" component={Profile} />
           <Route path="/settings" component={Settings} />

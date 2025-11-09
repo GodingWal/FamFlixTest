@@ -1168,6 +1168,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       if (!accessGranted) {
+        const storyAudioEntry = await storage.getStoryAudioByAudioUrl(audioUrl);
+        if (storyAudioEntry) {
+          const voiceProfile = await storage.getVoiceProfile(storyAudioEntry.voiceId);
+          if (voiceProfile) {
+            if (voiceProfile.userId === user.id) {
+              accessGranted = true;
+            } else if (voiceProfile.familyId) {
+              accessGranted = await userHasFamilyAccess(voiceProfile.familyId, user.id);
+            }
+          }
+        }
+      }
+
+      if (!accessGranted) {
         return res.status(403).json({ error: "Access denied" });
       }
 

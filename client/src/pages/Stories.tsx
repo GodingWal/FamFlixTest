@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { Navigation } from "@/components/Navigation";
 import AdBanner from "@/components/AdBanner";
 import {
@@ -148,6 +149,8 @@ interface ActiveJob {
   voiceId: string;
 }
 
+const ACTIVE_JOB_STORAGE_KEY = "famflix-story-active-job";
+
 const EMPTY_AUDIO_ENTRY: StoryAudioEntry = {
   status: "PENDING",
   audioUrl: null,
@@ -227,6 +230,34 @@ export default function Stories() {
   const [playIndex, setPlayIndex] = useState<number>(0);
   const playAllAudioRef = useRef<HTMLAudioElement | null>(null);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    try {
+      const cached = window.sessionStorage.getItem(ACTIVE_JOB_STORAGE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached) as ActiveJob;
+        if (parsed?.jobId && parsed?.slug && parsed?.voiceId) {
+          setActiveJob(parsed);
+        }
+      }
+    } catch {
+      // Ignore malformed cache
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (activeJob) {
+      window.sessionStorage.setItem(ACTIVE_JOB_STORAGE_KEY, JSON.stringify(activeJob));
+    } else {
+      window.sessionStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+    }
+  }, [activeJob]);
+
   const {
     data: storiesResponse,
     isLoading: storiesLoading,
@@ -268,6 +299,16 @@ export default function Stories() {
     () => voiceProfiles.find((profile) => profile.id === selectedVoiceProfile) ?? null,
     [voiceProfiles, selectedVoiceProfile]
   );
+
+  const readyVoiceCount = useMemo(
+    () =>
+      voiceProfiles.filter(
+        (profile) => !profile.status || profile.status === "ready"
+      ).length,
+    [voiceProfiles]
+  );
+
+  const totalStories = storiesResponse?.total ?? stories.length;
 
   const categories = useMemo(
     () =>
@@ -618,359 +659,386 @@ export default function Stories() {
         jsonLd={faqSchema}
       />
       <Navigation />
-      <div className="container mx-auto px-4 pt-24 pb-10">
-        <div className="text-center mb-10">
-          <h1 className="text-4xl font-bold text-foreground mb-3">Family Stories</h1>
-          <p className="text-muted-foreground max-w-2xl mx-auto">
-            Discover curated stories for every member of the family. Pick a voice
-            you love and generate immersive narration with a single click.
-          </p>
-        </div>
-
-        <Card className="bg-card border border-border">
-          <CardHeader className="md:flex md:items-start md:justify-between gap-6">
-            <div className="md:flex-1">
-              <CardTitle className="text-foreground">Narration Voice</CardTitle>
-              <CardDescription>
-                Choose a voice profile to use when generating story narrations.
-              </CardDescription>
-            </div>
-            <div className="md:w-64 lg:w-72 mt-4 md:mt-0 flex flex-col gap-4">
-              <div>
-                {voicesLoading ? (
-                  <Skeleton className="h-10 w-full" />
-                ) : voiceProfiles.length > 0 ? (
-                  <Select
-                    value={selectedVoiceProfile ?? undefined}
-                    onValueChange={setSelectedVoiceProfile}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select a voice" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {voiceProfiles.map((profile) => (
-                        <SelectItem key={profile.id} value={profile.id}>
-                          {(profile.displayName ?? profile.name) ||
-                            profile.name}
-                          {profile.status && profile.status !== "ready"
-                            ? ` · ${profile.status}`
-                            : ""}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                ) : (
-                  <p className="text-sm text-muted-foreground">
-                    No voice profiles found. Visit the Voice Cloning studio to
-                    create one.
+      <div className="relative">
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-64 bg-gradient-to-b from-primary/15 via-transparent to-transparent" />
+        <div className="container relative z-10 mx-auto px-4 pt-24 pb-10">
+          <div className="space-y-10">
+            <section className="rounded-3xl border border-border/60 bg-card/80 px-6 py-8 shadow-lg backdrop-blur">
+              <div className="grid gap-6 md:grid-cols-[1.3fr_minmax(0,1fr)]">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-primary">
+                    Story Studio
                   </p>
-                )}
-              </div>
-              {user?.plan === 'free' && (
-                <AdBanner placementId="stories-sidebar" layout="sidebar" />
-              )}
-            </div>
-          </CardHeader>
-          <CardContent>
-            {storiesLoading ? (
-              <div className="space-y-4">
-                <Skeleton className="h-8 w-48" />
-                <Skeleton className="h-24 w-full" />
-                <Skeleton className="h-24 w-full" />
-              </div>
-            ) : storiesError ? (
-              <div className="text-center text-muted-foreground">
-                We couldn't load stories right now. Please try again later.
-              </div>
-            ) : stories.length === 0 ? (
-              <div className="text-center text-muted-foreground">
-                No stories are available yet. Check back soon!
-              </div>
-            ) : (
-              <div className="space-y-6">
-                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge variant="outline" className="bg-secondary text-secondary-foreground">
-                      {storiesResponse?.total ?? stories.length} stories
-                    </Badge>
-                    {selectedStorySummary && selectedVoiceProfile && (
-                      <Badge variant="outline" className="bg-accent/20 text-accent border border-accent/40">
-                        {selectedStorySummary.title} +{" "}
-                        {(selectedVoice?.displayName ?? selectedVoice?.name) || "Voice"}
-                      </Badge>
-                    )}
+                  <h1 className="mt-2 text-4xl font-semibold text-foreground">Family Stories</h1>
+                  <p className="mt-3 text-muted-foreground leading-relaxed">
+                    Browse curated bedtime adventures, pair them with a cherished family voice, and let
+                    FamFlix narrate the magic while you keep creating.
+                  </p>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-border/80 bg-background/70 p-4 shadow-sm">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Stories ready</p>
+                    <p className="mt-1 text-3xl font-bold text-foreground">{totalStories || 0}</p>
+                    <p className="text-sm text-muted-foreground">Hand-picked scripts</p>
                   </div>
-                  <div className="w-full md:w-64">
-                    <Select
-                      value={categoryFilter}
-                      onValueChange={(value) => setCategoryFilter(value)}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Filter by category" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="ALL">All categories</SelectItem>
-                        {categories.map((category) => (
-                          <SelectItem key={category} value={category}>
-                            {category}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                  <div className="rounded-2xl border border-border/80 bg-background/70 p-4 shadow-sm">
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">Ready voices</p>
+                    <p className="mt-1 text-3xl font-bold text-foreground">{readyVoiceCount}</p>
+                    <p className="text-sm text-muted-foreground">
+                      {(selectedVoice?.displayName ?? selectedVoice?.name) || "Select a voice"}
+                    </p>
                   </div>
                 </div>
+              </div>
+              <div className="mt-6 flex flex-wrap gap-3">
+                <Button className="px-6" asChild>
+                  <Link href="/stories/create">
+                    <i className="fas fa-pen-nib mr-2" />
+                    Create new story
+                  </Link>
+                </Button>
+                <Button variant="outline" asChild>
+                  <a href="#story-library" className="flex items-center gap-2 text-sm">
+                    <i className="fas fa-book-open" />
+                    Browse library
+                  </a>
+                </Button>
+              </div>
+            </section>
 
-                <div className="grid gap-4 lg:grid-cols-[2fr,3fr]">
-                  <div className="space-y-3">
-                    {filteredStories.map((story) => {
-                      const durationLabel = formatMinutes(story.durationMin);
-                      const isSelected = story.slug === selectedSlug;
-                      return (
-                        <button
-                          type="button"
-                          key={story.id}
-                          onClick={() => setSelectedSlug(story.slug)}
-                          className={cn(
-                            "w-full rounded-xl border border-border bg-card p-4 text-left transition hover:bg-secondary/30",
-                            isSelected && "ring-1 ring-primary/60"
-                          )}
-                        >
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <h3 className="text-lg font-semibold text-foreground">
-                                {story.title}
-                              </h3>
-                              <Badge variant="secondary" className="bg-secondary text-secondary-foreground">
-                                {story.category || "UNCATEGORIZED"}
-                              </Badge>
-                            </div>
-                            {story.summary ? (
-                              <p className="text-sm text-muted-foreground line-clamp-3">
-                                {story.summary}
-                              </p>
-                            ) : null}
-                            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                              {durationLabel && <span>{durationLabel}</span>}
-                              {story.ageRange?.min !== null ||
-                              story.ageRange?.max !== null ? (
-                                <span>
-                                  Ages{" "}
-                                  {story.ageRange.min ?? "?"}-
-                                  {story.ageRange.max ?? "?"}
-                                </span>
-                              ) : null}
-                              {story.tags.slice(0, 3).map((tag) => (
-                                <Badge
-                                  key={tag}
-                                  variant="outline"
-                                  className="border-border bg-secondary text-secondary-foreground"
-                                >
-                                  #{tag}
-                                </Badge>
-                              ))}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+            <div
+              id="story-library"
+              className="grid items-start gap-6 lg:grid-cols-[360px,minmax(0,1fr)]"
+            >
+              <div className="space-y-6">
+                <Card className="rounded-2xl border border-border/80 bg-card/90 shadow-sm">
+                  <CardHeader className="space-y-1">
+                    <CardTitle className="text-lg">Narration voice</CardTitle>
+                    <CardDescription>
+                      Choose which cloned voice will bring each story to life.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {voicesLoading ? (
+                      <Skeleton className="h-10 w-full" />
+                    ) : voiceProfiles.length > 0 ? (
+                      <Select
+                        value={selectedVoiceProfile ?? undefined}
+                        onValueChange={setSelectedVoiceProfile}
+                      >
+                        <SelectTrigger className="h-11 rounded-xl">
+                          <SelectValue placeholder="Select a voice" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {voiceProfiles.map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>
+                              {(profile.displayName ?? profile.name) || profile.name}
+                              {profile.status && profile.status !== "ready"
+                                ? ` · ${profile.status}`
+                                : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        No voice profiles found. Visit the Voice Cloning studio to create one.
+                      </p>
+                    )}
+                    {user?.plan === "free" && (
+                      <AdBanner placementId="stories-sidebar" layout="sidebar" />
+                    )}
+                  </CardContent>
+                </Card>
 
-                  <div className="rounded-xl border border-border bg-card p-6">
-                    {!selectedStorySummary ? (
-                      <div className="text-center text-muted-foreground">
-                        Select a story to explore its sections.
+                <Card className="rounded-2xl border border-border/80 bg-card/90 shadow-sm">
+                  <CardHeader className="space-y-1">
+                    <div className="flex items-center justify-between gap-3">
+                      <CardTitle className="text-lg">Story library</CardTitle>
+                      <Badge variant="outline" className="bg-secondary text-secondary-foreground">
+                        {totalStories || 0} stories
+                      </Badge>
+                    </div>
+                    <CardDescription>
+                      Filter by category and pick a script to preview and narrate.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {storiesLoading ? (
+                      <div className="space-y-3">
+                        <Skeleton className="h-10 w-full" />
+                        <Skeleton className="h-24 w-full" />
+                        <Skeleton className="h-24 w-full" />
+                      </div>
+                    ) : storiesError ? (
+                      <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+                        We couldn't load stories right now. Please try again later.
+                      </div>
+                    ) : stories.length === 0 ? (
+                      <div className="rounded-xl border border-border bg-muted/30 p-6 text-center text-muted-foreground">
+                        No stories are available yet. Check back soon!
                       </div>
                     ) : (
-                      <div className="space-y-6">
-                        <div className="space-y-3">
-                          <div className="flex flex-wrap items-start justify-between gap-4">
-                            <div>
-                              <h2 className="text-2xl font-semibold text-foreground">
-                                {selectedStorySummary.title}
-                              </h2>
-                              {selectedStorySummary.author && (
-                                <p className="text-sm text-muted-foreground">
-                                  By {selectedStorySummary.author}
+                      <div className="space-y-4">
+                        <Select
+                          value={categoryFilter}
+                          onValueChange={(value) => setCategoryFilter(value)}
+                        >
+                          <SelectTrigger className="h-11 rounded-xl">
+                            <SelectValue placeholder="Filter by category" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ALL">All categories</SelectItem>
+                            {categories.map((category) => (
+                              <SelectItem key={category} value={category}>
+                                {category}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+                          {filteredStories.map((story) => {
+                            const durationLabel = formatMinutes(story.durationMin);
+                            const isSelected = story.slug === selectedSlug;
+                            return (
+                              <button
+                                type="button"
+                                key={story.id}
+                                onClick={() => setSelectedSlug(story.slug)}
+                                className={cn(
+                                  "w-full rounded-2xl border border-border/80 bg-background/80 p-4 text-left transition hover:border-primary/50 hover:bg-primary/5",
+                                  isSelected && "border-primary/60 bg-primary/5 shadow-sm"
+                                )}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <h3 className="text-lg font-semibold text-foreground">{story.title}</h3>
+                                  {durationLabel && (
+                                    <span className="text-xs text-muted-foreground">{durationLabel}</span>
+                                  )}
+                                </div>
+                                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                  <span className="font-medium text-foreground/70">{story.category}</span>
+                                  {story.ageRange?.min !== null && story.ageRange?.max !== null && (
+                                    <span>
+                                      Ages {story.ageRange.min}–{story.ageRange.max}
+                                    </span>
+                                  )}
+                                  {story.tags?.slice(0, 3).map((tag) => (
+                                    <span key={tag} className="rounded-full bg-secondary/30 px-2 py-0.5">
+                                      #{tag}
+                                    </span>
+                                  ))}
+                                </div>
+                                <p className="mt-2 text-sm text-muted-foreground line-clamp-2">
+                                  {story.summary ?? "Magical bedtime story."}
                                 </p>
-                              )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="rounded-2xl border border-border bg-card/95 shadow-xl">
+                <CardHeader>
+                  <CardTitle>Story details &amp; narration</CardTitle>
+                  <CardDescription>
+                    Generate, monitor, and download narration for the selected script.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {storiesLoading ? (
+                    <div className="space-y-3">
+                      <Skeleton className="h-10 w-2/3" />
+                      <Skeleton className="h-6 w-full" />
+                      <Skeleton className="h-40 w-full" />
+                    </div>
+                  ) : !selectedStorySummary || !storyDetail ? (
+                    <div className="rounded-2xl border border-dashed border-border p-10 text-center text-muted-foreground">
+                      Select a story from the left to see its details and narration progress.
+                    </div>
+                  ) : (
+                    <div className="space-y-6">
+                      <div className="rounded-2xl border border-border bg-muted/30 p-6 shadow-sm space-y-6">
+                        <div className="flex flex-col gap-2 border-b border-border pb-4">
+                          <div className="flex items-center justify-between gap-4">
+                            <div>
+                              <h2 className="text-2xl font-bold text-foreground">{storyDetail.title}</h2>
+                              <p className="text-sm text-muted-foreground">
+                                {storyDetail.author ? `By ${storyDetail.author}` : "FamFlix Original"} · {storyDetail.category}
+                              </p>
                             </div>
-                            <div className="flex flex-wrap gap-2">
-                              <Badge variant="outline" className="border-border bg-secondary text-secondary-foreground">
-                                {selectedStorySummary.category}
-                              </Badge>
-                              <Badge variant="outline" className="border-border bg-secondary text-secondary-foreground">
-                                Rights: {selectedStorySummary.rights}
-                              </Badge>
-                            </div>
+                            {storyDetail.coverUrl && (
+                              <img
+                                src={storyDetail.coverUrl}
+                                alt={storyDetail.title}
+                                className="h-20 w-20 rounded-xl object-cover shadow"
+                              />
+                            )}
                           </div>
-                          {selectedStorySummary.summary && (
-                            <p className="text-sm text-muted-foreground leading-relaxed">
-                              {selectedStorySummary.summary}
-                            </p>
-                          )}
-                          {selectedStorySummary.tags.length > 0 && (
-                            <div className="flex flex-wrap gap-2 text-xs">
-                              {selectedStorySummary.tags.map((tag) => (
-                                <Badge
-                                  key={tag}
-                                  variant="outline"
-                                  className="border-border bg-secondary text-secondary-foreground"
-                                >
-                                  #{tag}
-                                </Badge>
-                              ))}
-                            </div>
-                          )}
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            {storyDetail.ageRange?.min !== null && storyDetail.ageRange?.max !== null && (
+                              <Badge variant="outline" className="bg-secondary/10 text-secondary-foreground">
+                                Ages {storyDetail.ageRange.min}–{storyDetail.ageRange.max}
+                              </Badge>
+                            )}
+                            {storyDetail.tags?.slice(0, 3).map((tag) => (
+                              <Badge key={tag} variant="outline" className="bg-secondary/10 text-secondary-foreground">
+                                #{tag}
+                              </Badge>
+                            ))}
+                          </div>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-3">
-                          {/* Full Story Player */}
-                          <div className="w-full rounded-md border border-border bg-card p-3 md:w-auto md:flex md:items-center md:gap-3">
-                            <div className="flex items-center gap-2">
-                              <Button
-                                size="sm"
-                                variant={isPlayAll ? "secondary" : "default"}
-                                onClick={handlePlayAllToggle}
-                                disabled={playableSections.length === 0}
-                              >
-                                {isPlayAll ? (
-                                  <span className="flex items-center gap-2">
-                                    <i className="fas fa-pause" /> Pause All
-                                  </span>
-                                ) : (
-                                  <span className="flex items-center gap-2">
-                                    <i className="fas fa-play" /> Play All
-                                  </span>
+                        <div className="flex flex-col gap-4 rounded-lg border border-border bg-card/60 p-4">
+                          <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                            <div>
+                              <p className="text-sm text-muted-foreground">
+                                {(selectedVoice?.displayName ?? selectedVoice?.name) || "Select a voice"} narrates
+                                {selectedStorySummary?.title ? ` “${selectedStorySummary.title}”` : " this story"}.
+                              </p>
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                {storyDetail.durationMin && (
+                                  <Badge variant="outline" className="bg-secondary/10 text-secondary-foreground">
+                                    ~{formatMinutes(storyDetail.durationMin)}
+                                  </Badge>
                                 )}
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={prevSection}
-                                disabled={playableSections.length === 0 || playIndex === 0}
-                              >
-                                <i className="fas fa-backward" />
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={nextSection}
-                                disabled={playableSections.length === 0 || playIndex >= playableSections.length - 1}
-                              >
-                                <i className="fas fa-forward" />
-                              </Button>
+                                <Badge variant="outline" className="bg-secondary/10 text-secondary-foreground">
+                                  {storyDetail.rights}
+                                </Badge>
+                              </div>
                             </div>
-                            <div className="mt-2 text-xs text-muted-foreground md:mt-0 md:ml-3">
-                              {playableSections.length > 0 ? (
-                                <span>
-                                  Section {Math.min(playIndex + 1, playableSections.length)} / {playableSections.length}
+                            <div className="flex flex-col gap-3 md:items-end">
+                              <audio
+                                ref={playAllAudioRef}
+                                className="hidden w-full md:block"
+                                controls
+                                preload="none"
+                                onEnded={nextSection}
+                                onError={nextSection}
+                              />
+                              <div className="flex items-center gap-2">
+                                <Button
+                                  onClick={() => {
+                                    if (playableSections.length === 0) return;
+                                    setIsPlayAll((prev) => !prev);
+                                  }}
+                                  variant={isPlayAll ? "default" : "secondary"}
+                                  size="sm"
+                                  disabled={playableSections.length === 0}
+                                >
+                                  {isPlayAll ? (
+                                    <>
+                                      <i className="fas fa-pause mr-2" /> Pause All
+                                    </>
+                                  ) : (
+                                    <>
+                                      <i className="fas fa-play mr-2" /> Play All
+                                    </>
+                                  )}
+                                </Button>
+                                <Button size="icon" variant="ghost" onClick={prevSection} disabled={playIndex === 0}>
+                                  <i className="fas fa-chevron-left" />
+                                </Button>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  onClick={nextSection}
+                                  disabled={playIndex >= playableSections.length - 1}
+                                >
+                                  <i className="fas fa-chevron-right" />
+                                </Button>
+                              </div>
+                              <audio
+                                ref={playAllAudioRef}
+                                className="mt-2 w-full md:hidden"
+                                controls
+                                preload="none"
+                                onEnded={nextSection}
+                                onError={nextSection}
+                              />
+                              <div className="mt-2 md:mt-0 md:ml-3">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  asChild
+                                  disabled={!selectedSlug || !selectedVoiceProfile || playableSections.length === 0}
+                                >
+                                  <a
+                                    href={`/api/stories/${selectedSlug}/download/full?voiceId=${encodeURIComponent(
+                                      selectedVoiceProfile ?? ''
+                                    )}`}
+                                  >
+                                    <i className="fas fa-download mr-2" /> Download All
+                                  </a>
+                                </Button>
+                              </div>
+                            </div>
+
+                            <Button
+                              onClick={() => handleNarrate(false)}
+                              disabled={Boolean(
+                                !selectedVoiceProfile ||
+                                voicesLoading ||
+                                requestNarration.isPending ||
+                                Boolean(activeJob) ||
+                                (!!selectedVoice?.status && selectedVoice.status !== "ready")
+                              )}
+                            >
+                              {requestNarration.isPending || activeJob ? (
+                                <span className="flex items-center gap-2">
+                                  <i className="fas fa-circle-notch animate-spin" />
+                                  Generating narration...
                                 </span>
                               ) : (
-                                <span>No generated audio yet</span>
+                                <span className="flex items-center gap-2">
+                                  <i className="fas fa-magic" />
+                                  Read with {(selectedVoice?.displayName ?? selectedVoice?.name) || "selected voice"}
+                                </span>
+                              )}
+                            </Button>
+                            <Button
+                              variant="outline"
+                              onClick={() => handleNarrate(true)}
+                              disabled={!selectedVoiceProfile || voicesLoading || requestNarration.isPending || Boolean(activeJob)}
+                            >
+                              Regenerate audio
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              onClick={() => {
+                                if (selectedSlug && selectedVoiceProfile) {
+                                  refetchStoryAudio();
+                                }
+                              }}
+                              disabled={!selectedSlug || !selectedVoiceProfile || audioFetching}
+                            >
+                              Refresh status
+                            </Button>
+                          </div>
+
+                          {jobStatus && (
+                            <div className="rounded-lg border border-border bg-card p-4 space-y-3 text-sm">
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="font-medium text-foreground">Synthesis progress</span>
+                                <Badge variant="outline" className={jobStateBadge(jobStatus.state)}>
+                                  {JOB_STATE_LABEL[jobStatus.state] ?? jobStatus.state}
+                                </Badge>
+                              </div>
+                              <Progress value={jobStatus.progress ?? 0} />
+                              <div className="flex items-center justify-between text-xs text-muted-foreground">
+                                <span>Job ID: {jobStatus.id}</span>
+                                <span>{Math.round(jobStatus.progress ?? 0)}%</span>
+                              </div>
+                              {jobStatus.failedReason && (
+                                <p className="text-xs text-destructive">{jobStatus.failedReason}</p>
                               )}
                             </div>
-                            {/* Hidden but usable audio element for Play All */}
-                            <audio
-                              ref={playAllAudioRef}
-                              className="mt-2 w-full md:hidden"
-                              controls
-                              preload="none"
-                              onEnded={nextSection}
-                              onError={nextSection}
-                            />
-                            {/* Download full story */}
-                            <div className="mt-2 md:mt-0 md:ml-3">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                asChild
-                                disabled={!selectedSlug || !selectedVoiceProfile || playableSections.length === 0}
-                              >
-                                <a
-                                  href={`/api/stories/${selectedSlug}/download/full?voiceId=${encodeURIComponent(
-                                    selectedVoiceProfile ?? ''
-                                  )}`}
-                                >
-                                  <i className="fas fa-download mr-2" /> Download All
-                                </a>
-                              </Button>
-                            </div>
-                          </div>
-
-                          <Button
-                            onClick={() => handleNarrate(false)}
-                            disabled={Boolean(
-                              !selectedVoiceProfile ||
-                              voicesLoading ||
-                              requestNarration.isPending ||
-                              Boolean(activeJob) ||
-                              (!!selectedVoice?.status && selectedVoice.status !== "ready")
-                            )}
-                          >
-                            {requestNarration.isPending || activeJob ? (
-                              <span className="flex items-center gap-2">
-                                <i className="fas fa-circle-notch animate-spin" />
-                                Generating narration...
-                              </span>
-                            ) : (
-                              <span className="flex items-center gap-2">
-                                <i className="fas fa-magic" />
-                                Read with{" "}
-                                {(selectedVoice?.displayName ?? selectedVoice?.name) ||
-                                  "selected voice"}
-                              </span>
-                            )}
-                          </Button>
-                          <Button
-                            variant="outline"
-                            onClick={() => handleNarrate(true)}
-                            disabled={
-                              !selectedVoiceProfile ||
-                              voicesLoading ||
-                              requestNarration.isPending ||
-                              Boolean(activeJob)
-                            }
-                          >
-                            Regenerate audio
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            onClick={() => {
-                              if (selectedSlug && selectedVoiceProfile) {
-                                refetchStoryAudio();
-                              }
-                            }}
-                            disabled={!selectedSlug || !selectedVoiceProfile || audioFetching}
-                          >
-                            Refresh status
-                          </Button>
+                          )}
                         </div>
-
-                        {jobStatus && (
-                          <div className="rounded-lg border border-border bg-card p-4 space-y-3 text-sm">
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="font-medium text-foreground">
-                                Synthesis progress
-                              </span>
-                              <Badge
-                                variant="outline"
-                                className={jobStateBadge(jobStatus.state)}
-                              >
-                                {JOB_STATE_LABEL[jobStatus.state] ?? jobStatus.state}
-                              </Badge>
-                            </div>
-                            <Progress value={jobStatus.progress ?? 0} />
-                            <div className="flex items-center justify-between text-xs text-muted-foreground">
-                              <span>Job ID: {jobStatus.id}</span>
-                              <span>{Math.round(jobStatus.progress ?? 0)}%</span>
-                            </div>
-                            {jobStatus.failedReason && (
-                              <p className="text-xs text-destructive">
-                                {jobStatus.failedReason}
-                              </p>
-                            )}
-                          </div>
-                        )}
 
                         {detailLoading ? (
                           <div className="space-y-3">
@@ -987,9 +1055,7 @@ export default function Stories() {
                             )}
 
                             <div className="space-y-4">
-                              <h3 className="text-lg font-semibold text-foreground">
-                                Sections &amp; audio
-                              </h3>
+                              <h3 className="text-lg font-semibold text-foreground">Sections &amp; audio</h3>
                               {mergedSections.length === 0 ? (
                                 <p className="text-sm text-slate-300">
                                   We could not load story sections yet. Try refreshing the page.
@@ -997,11 +1063,9 @@ export default function Stories() {
                               ) : (
                                 <div className="space-y-4">
                                   {mergedSections.map((section, index) => {
-                                    const status =
-                                      section.audio.status ?? "PENDING";
+                                    const status = section.audio.status ?? "PENDING";
                                     const badgeClass =
-                                      STATUS_BADGE_CLASS[status] ??
-                                      STATUS_BADGE_CLASS.PENDING;
+                                      STATUS_BADGE_CLASS[status] ?? STATUS_BADGE_CLASS.PENDING;
                                     return (
                                       <div
                                         key={section.id}
@@ -1027,12 +1091,7 @@ export default function Stories() {
                                           </p>
                                         )}
                                         {section.audio.audioUrl ? (
-                                          <audio
-                                            controls
-                                            preload="none"
-                                            className="w-full"
-                                            src={section.audio.audioUrl}
-                                          />
+                                          <audio controls preload="none" className="w-full" src={section.audio.audioUrl} />
                                         ) : (
                                           <p className="text-xs text-slate-400">
                                             Audio will appear here once generation completes.
@@ -1060,13 +1119,13 @@ export default function Stories() {
                           </>
                         )}
                       </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

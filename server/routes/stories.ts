@@ -1,4 +1,5 @@
 import { Router, type RequestHandler } from "express";
+import { z } from "zod";
 
 import { config } from "../config";
 import { storage } from "../storage";
@@ -13,6 +14,11 @@ import {
   type RightsStatus,
 } from "../db/schema";
 import { enqueueStorySynthesis, storyQueue, type StorySynthesisJobData } from "../queues/storyQueue";
+import {
+  cancelLocalStoryJob,
+  enqueueLocalStoryJob,
+  getLocalStoryJob,
+} from "../queues/localStoryQueue";
 import { hasTTSProvider, getTTSProvider } from "../tts";
 import { spawn } from "child_process";
 import path from "path";
@@ -25,6 +31,27 @@ const STORY_MODE_NOT_ENABLED = { error: "Story Mode is not enabled" } as const;
 const STORY_RIGHTS_FOR_PUBLIC: RightsStatus[] = ["PUBLIC_DOMAIN", "LICENSED", "ORIGINAL"];
 const CATEGORY_SET = new Set(storyCategories.map((category) => category.toUpperCase()));
 const RIGHTS_SET = new Set(rightsStatuses.map((status) => status.toUpperCase()));
+
+// Helpers for slugging titles
+const baseSlug = (input: string) =>
+  input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+async function generateUniqueSlug(title: string): Promise<string> {
+  const initial = baseSlug(title) || "story";
+  let slug = initial;
+  let i = 2;
+  // Ensure uniqueness by checking storage
+  while (await storage.getStoryBySlug(slug)) {
+    slug = `${initial}-${i++}`;
+  }
+  return slug;
+}
 
 const ensureStoryModeEnabled: RequestHandler = (_req, res, next) => {
   if (!config.FEATURE_STORY_MODE) {
@@ -212,6 +239,76 @@ router.get("/api/stories", ensureStoryModeEnabled, async (req, res) => {
   });
 });
 
+// Create a new story from an existing template
+router.post("/api/stories", authenticateToken, ensureStoryModeEnabled, async (req: AuthRequest, res) => {
+  const schema = z.object({
+    title: z.string().min(1).max(200),
+    templateSlug: z.string().min(1),
+    voiceProfileId: z.string().min(1),
+  });
+
+  let body: z.infer<typeof schema>;
+  try {
+    body = schema.parse(req.body ?? {});
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || "Invalid request" });
+  }
+
+  // Validate template story exists and is public
+  const template = await storage.getStoryBySlug(body.templateSlug);
+  if (!template || !storyAccessibleToPublic(template)) {
+    return res.status(404).json({ error: "Template story not found" });
+  }
+
+  // Validate voice belongs to user (we won't synthesize here, but we enforce access early)
+  const voice = await storage.getVoiceProfile(body.voiceProfileId);
+  if (!voice || voice.userId !== req.user!.id) {
+    return res.status(403).json({ error: "You do not have access to this voice profile" });
+  }
+
+  const slug = await generateUniqueSlug(body.title);
+  const sections = await storage.getStorySections(template.id);
+
+  // Create the new story, inheriting content and metadata from the template
+  const newStory = await storage.createStory({
+    slug,
+    title: body.title.trim(),
+    author: template.author ?? null,
+    category: template.category ?? undefined,
+    ageMin: template.ageMin ?? undefined,
+    ageMax: template.ageMax ?? undefined,
+    tags: template.tags ?? [],
+    coverUrl: template.coverUrl ?? undefined,
+    durationMin: template.durationMin ?? undefined,
+    rights: "ORIGINAL",
+    attribution: template.attribution ?? undefined,
+    content: template.content,
+    summary: template.summary ?? undefined,
+    familyId: undefined,
+    createdBy: req.user!.id,
+    status: "generated",
+    // Do NOT copy template metadata like 'sourceFile' into clones; mark template reference only
+    metadata: { templateSlug: template.slug, templateTitle: template.title },
+  });
+
+  // Copy sections
+  await storage.replaceStorySections(
+    newStory.id,
+    sections.map((s) => ({
+      storyId: newStory.id,
+      sectionIndex: s.sectionIndex,
+      title: s.title ?? undefined,
+      text: s.text,
+      wordCount: s.wordCount ?? undefined,
+    }))
+  );
+
+  return res.json({
+    story: serializeStory(newStory),
+    template: { slug: template.slug, id: template.id, title: template.title },
+  });
+});
+
 router.get("/api/stories/:slug", ensureStoryModeEnabled, async (req, res) => {
   const story = await storage.getStoryBySlug(req.params.slug);
   if (!story || !storyAccessibleToPublic(story)) {
@@ -275,9 +372,13 @@ router.post("/api/stories/:slug/read", authenticateToken, ensureStoryModeEnabled
   const jobId = `${story.id}:${voiceId}`;
 
   if (force) {
-    const existingJob = await storyQueue.getJob(jobId);
-    if (existingJob) {
-      await existingJob.remove();
+    if (config.REDIS_URL) {
+      const existingJob = await storyQueue.getJob(jobId);
+      if (existingJob) {
+        await existingJob.remove();
+      }
+    } else {
+      cancelLocalStoryJob(jobId);
     }
   }
 
@@ -297,57 +398,86 @@ router.post("/api/stories/:slug/read", authenticateToken, ensureStoryModeEnabled
     }
   }
 
-  // If Redis is not configured, run a synchronous fallback and return ready sections immediately
+  // If Redis is not configured, simulate a background worker locally
   if (!config.REDIS_URL) {
-    const provider = getTTSProvider(voice.provider ?? config.TTS_PROVIDER);
+    const job = enqueueLocalStoryJob(
+      { storyId: story.id, voiceId, force: Boolean(force) },
+      async ({ updateProgress, isCancelled }) => {
+        const provider = getTTSProvider(voice.provider ?? config.TTS_PROVIDER);
+        const latestSections = await storage.getStorySections(story.id);
+        const audioEntries = await storage.getStoryAudioForVoice(story.id, voiceId);
+        const localAudioMap = new Map(audioEntries.map((entry) => [entry.sectionId, entry]));
+        let completed = 0;
 
-    for (const section of sections) {
-      const current = audioMap.get(section.id);
-      if (!force && current && current.status === "COMPLETE" && current.audioUrl) {
-        continue;
-      }
+        for (const section of latestSections) {
+          if (isCancelled()) {
+            throw new Error("Job cancelled");
+          }
 
-      await storage.upsertStoryAudio(section.id, voiceId, {
-        status: "PROCESSING",
-        startedAt: new Date(),
-      });
+          const currentEntry = localAudioMap.get(section.id);
+          if (!force && currentEntry && currentEntry.status === "COMPLETE" && currentEntry.audioUrl) {
+            completed += 1;
+            updateProgress((completed / latestSections.length) * 100);
+            continue;
+          }
 
-      try {
-        const result = await provider.synthesize({
-          text: section.text,
-          voiceRef: voice.providerRef!,
-          modelId: voice.modelId ?? undefined,
+          await storage.upsertStoryAudio(section.id, voiceId, {
+            status: "PROCESSING",
+            startedAt: new Date(),
+          });
+
+          try {
+            const result = await provider.synthesize({
+              text: section.text,
+              voiceRef: voice.providerRef!,
+              modelId: voice.modelId ?? undefined,
+              storyId: story.id,
+              sectionId: section.id,
+            } as any);
+
+            await storage.upsertStoryAudio(section.id, voiceId, {
+              status: "COMPLETE",
+              audioUrl: result.url,
+              durationSec: result.durationSec,
+              checksum: result.checksum,
+              completedAt: new Date(),
+              metadata: { key: result.key },
+            });
+          } catch (err) {
+            await storage.upsertStoryAudio(section.id, voiceId, {
+              status: "ERROR",
+              error: err instanceof Error ? err.message : String(err),
+              completedAt: new Date(),
+            });
+            throw err instanceof Error ? err : new Error(String(err));
+          }
+
+          completed += 1;
+          updateProgress((completed / latestSections.length) * 100);
+        }
+
+        return {
           storyId: story.id,
-          sectionId: section.id,
-        } as any);
-
-        await storage.upsertStoryAudio(section.id, voiceId, {
-          status: "COMPLETE",
-          audioUrl: result.url,
-          durationSec: result.durationSec,
-          checksum: result.checksum,
-          completedAt: new Date(),
-          metadata: { key: result.key },
-        });
-      } catch (err) {
-        await storage.upsertStoryAudio(section.id, voiceId, {
-          status: "ERROR",
-          error: err instanceof Error ? err.message : String(err),
-          completedAt: new Date(),
-        });
+          voiceId,
+          sections: latestSections.length,
+        };
       }
-    }
-
-    const updatedAudio = await storage.getStoryAudioForVoice(story.id, voiceId);
-    const updatedMap = new Map(updatedAudio.map((a) => [a.sectionId, a]));
+    );
 
     return res.json({
-      ready: true,
-      jobId: null,
-      sections: sections.map((section) => ({
-        ...serializeSection(section, { includeText: true }),
-        audio: serializeAudioEntry(updatedMap.get(section.id)),
-      })),
+      ready: false,
+      jobId,
+      state: job.state,
+      progress: job.progress,
+      story: {
+        id: story.id,
+        slug: story.slug,
+        title: story.title,
+      },
+      voice: {
+        id: voice.id,
+        displayName: voice.displayName ?? voice.name,
+      },
     });
   }
 
@@ -416,6 +546,32 @@ router.get("/api/stories/:slug/audio", authenticateToken, ensureStoryModeEnabled
 });
 
 router.get("/api/jobs/:jobId", authenticateToken, ensureStoryModeEnabled, async (req: AuthRequest, res) => {
+  if (!config.REDIS_URL) {
+    const job = getLocalStoryJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: "Job not found" });
+    }
+
+    const voice = await storage.getVoiceProfile(job.data.voiceId);
+    if (!voice || voice.userId !== req.user!.id) {
+      return res.status(403).json({ error: "You do not have access to this job" });
+    }
+
+    return res.json({
+      id: job.id,
+      state: job.state,
+      progress: job.progress,
+      attempts: job.attempts,
+      data: job.data,
+      result: job.result ?? null,
+      failedReason: job.failedReason ?? null,
+      timestamp: {
+        createdAt: job.timestamps.createdAt.toISOString(),
+        finishedAt: job.timestamps.finishedAt ? job.timestamps.finishedAt.toISOString() : null,
+      },
+    });
+  }
+
   const job = await storyQueue.getJob(req.params.jobId);
   if (!job) {
     return res.status(404).json({ error: "Job not found" });
@@ -581,7 +737,11 @@ router.get("/api/stories/:slug/download/full", authenticateToken, ensureStoryMod
     if (!res.headersSent) {
       res.status(500).json({ error: e.message });
     } else {
-      try { res.end(); } catch {}
+      try {
+        res.end();
+      } catch (closeError) {
+        console.warn("[stories] Failed to end response after ffmpeg error:", closeError);
+      }
     }
   });
   ff.on("close", (code) => {
@@ -589,7 +749,11 @@ router.get("/api/stories/:slug/download/full", authenticateToken, ensureStoryMod
       if (!res.headersSent) {
         res.status(500).json({ error: `ffmpeg failed with code ${code}: ${errBuf}` });
       } else {
-        try { res.end(); } catch {}
+        try {
+          res.end();
+        } catch (closeError) {
+          console.warn("[stories] Failed to end response after ffmpeg close:", closeError);
+        }
       }
     }
   });
