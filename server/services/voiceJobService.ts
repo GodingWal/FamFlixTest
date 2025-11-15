@@ -30,13 +30,39 @@ export interface VoiceJobData {
       recommendations: string[];
     };
   }[];
-  audioFiles?: Buffer[]; // Store audio data for processing
+}
+
+interface VoiceJobInternal extends VoiceJobData {
+  audioFiles: Buffer[];
 }
 
 class VoiceJobService {
-  private jobs: Map<string, VoiceJobData> = new Map();
+  private jobs: Map<string, VoiceJobInternal> = new Map();
   private processingQueue: string[] = [];
   private isProcessing = false;
+
+  private toPublicJob(job: VoiceJobInternal): VoiceJobData {
+    const { audioFiles, recordings, result, ...rest } = job;
+    return {
+      ...rest,
+      result: result
+        ? {
+            voiceId: result.voiceId,
+            sampleUrl: result.sampleUrl,
+            qualityScore: result.qualityScore,
+          }
+        : undefined,
+      recordings: recordings.map(recording => ({
+        id: recording.id,
+        duration: recording.duration,
+        quality: {
+          score: recording.quality.score,
+          issues: [...recording.quality.issues],
+          recommendations: [...recording.quality.recommendations],
+        },
+      })),
+    };
+  }
 
   async createJob(
     name: string,
@@ -57,7 +83,7 @@ class VoiceJobService {
   ): Promise<VoiceJobData> {
     const jobId = nanoid();
     
-    const job: VoiceJobData = {
+    const job: VoiceJobInternal = {
       id: jobId,
       name,
       userId,
@@ -95,7 +121,7 @@ class VoiceJobService {
     // Start processing if not already running
     this.processQueue();
 
-    return job;
+    return this.toPublicJob(job);
   }
 
   private calculateEstimatedTime(recordings: Array<{ metadata: { duration: number } }>): number {
@@ -138,7 +164,7 @@ class VoiceJobService {
     this.isProcessing = false;
   }
 
-  private async processJob(job: VoiceJobData) {
+  private async processJob(job: VoiceJobInternal) {
     try {
       logger.info('Starting job processing', { jobId: job.id });
 
@@ -178,6 +204,9 @@ class VoiceJobService {
       job.stage = 'completed';
       job.completedTime = new Date();
       job.result = result;
+
+      // Release in-memory buffers after successful processing
+      job.audioFiles = [];
 
       const processingTime = Date.now() - startTime;
       
@@ -238,7 +267,7 @@ class VoiceJobService {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  private async processVoiceCloning(job: VoiceJobData, audioFiles: Buffer[]) {
+  private async processVoiceCloning(job: VoiceJobInternal, audioFiles: Buffer[]) {
     try {
       logger.info('Processing voice cloning with Chatterbox TTS', {
         jobId: job.id,
@@ -269,7 +298,7 @@ class VoiceJobService {
       });
       
       return {
-        voiceId: voiceProfile.modelId || `voice_${nanoid()}`,
+        voiceId: voiceProfile.id,
         qualityScore: this.calculateOverallQuality(job.recordings),
         sampleUrl: voiceProfile.audioSampleUrl || `/api/voice-samples/${job.id}/sample.wav`,
       };
@@ -318,11 +347,14 @@ class VoiceJobService {
   }
 
   getJob(jobId: string): VoiceJobData | undefined {
-    return this.jobs.get(jobId);
+    const job = this.jobs.get(jobId);
+    return job ? this.toPublicJob(job) : undefined;
   }
 
   getJobsByUser(userId: string): VoiceJobData[] {
-    return Array.from(this.jobs.values()).filter(job => job.userId === userId);
+    return Array.from(this.jobs.values())
+      .filter(job => job.userId === userId)
+      .map(job => this.toPublicJob(job));
   }
 
   async cancelJob(jobId: string): Promise<boolean> {
@@ -335,10 +367,11 @@ class VoiceJobService {
       if (queueIndex > -1) {
         this.processingQueue.splice(queueIndex, 1);
       }
-      
+
       job.status = 'failed';
       job.error = 'Cancelled by user';
       job.completedTime = new Date();
+      job.audioFiles = [];
 
       logger.info('Job cancelled', { jobId });
       
@@ -385,7 +418,7 @@ class VoiceJobService {
     // Start processing
     this.processQueue();
 
-    return job;
+    return this.toPublicJob(job);
   }
 
   getQueueStatus() {
