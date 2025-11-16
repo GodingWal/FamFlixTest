@@ -76,3 +76,24 @@ Copy `.env.example` to `.env` and configure:
 - **Database connection errors**: Ensure PostgreSQL is running and the DATABASE_URL is correct
 - **Permission errors**: Make sure the database user has proper permissions
 - **Port conflicts**: Change the PORT in `.env` if 5000 is already in use
+
+## Admin Video Processing Pipeline
+
+Admin video uploads now trigger a local Python pipeline (in `windsurf-project/`) that extracts audio, diarizes speakers, and generates a Whisper transcription. Make sure the following prerequisites are met before uploading videos from the admin UI:
+
+1. **Python 3.10+ and ffmpeg** installed on your machine.
+2. Create a virtual environment inside `windsurf-project/` and install the requirements:
+   ```bash
+   cd windsurf-project
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+3. Point the backend to that interpreter by setting one of the following in `.env` (they are read in this order):
+   - `ADMIN_PIPELINE_PYTHON_BIN=/absolute/path/to/venv/bin/python`
+   - or reuse the global `PYTHON_BIN` that already defaults to `python3`
+4. Optional tuning:
+   - `ADMIN_PIPELINE_WHISPER_MODEL` (default `medium`)
+   - `ADMIN_PIPELINE_LANGUAGE` (defaults to Whisper auto-detect)
+
+Pipeline artifacts (clean WAV, diarization JSON, transcripts) are stored under `uploads/admin-pipeline/` and referenced from `videos.metadata.pipeline`. The JSON blob includes the most recent job status plus links to the generated files served from `/uploads`. If the pipeline cannot start, the upload request fails so you can fix the environment and retry.

@@ -4,42 +4,21 @@ import { sql } from 'drizzle-orm';
 import { authenticateToken, AuthRequest } from '../middleware/auth-simple.js';
 import { videoService } from '../services/videoService';
 import { storage } from '../storage';
+import { adminVideoPipelineService } from '../services/adminVideoPipelineService';
+import { ensureTemplateVideosTable } from '../utils/templateVideos';
 import path from 'path';
 import fs from 'fs/promises';
 import { spawn } from 'child_process';
 
 const router = Router();
 
-// Ensure template_videos table exists (runtime guard)
-async function ensureTemplateVideosTable() {
-  await db.run(sql`
-    CREATE TABLE IF NOT EXISTS template_videos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      description TEXT,
-      thumbnail_url TEXT,
-      video_url TEXT NOT NULL,
-      duration INTEGER,
-      category TEXT DEFAULT 'general',
-      tags TEXT DEFAULT '[]',
-      difficulty TEXT DEFAULT 'easy',
-      is_active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
-}
+const projectTranscriptDir = path.join(process.cwd(), 'uploads', 'admin-pipeline', 'project-transcripts');
 
 async function setProjectProgress(projectId: string | number, progress: number, stage: string) {
   try {
     const now = new Date().toISOString();
     const row = await db.get(sql`SELECT metadata FROM video_projects WHERE id = ${projectId}`);
-    let meta: any = {};
-    try {
-      meta = row?.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {};
-    } catch {
-      meta = {};
-    }
+    const meta = parseMetadata(row?.metadata);
     const history = Array.isArray(meta.processingHistory) ? meta.processingHistory : [];
     history.push({ status: stage, timestamp: now });
     meta.processingHistory = history;
@@ -60,8 +39,62 @@ function toLocalUploadsPath(url: string): string {
   return path.join(process.cwd(), url.replace(/^\/+/, ''));
 }
 
+function parseMetadata(value: unknown): Record<string, any> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? { ...parsed } : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  return {};
+}
+
+async function persistProjectTranscript(projectId: string | number, segments: any[]): Promise<string | null> {
+  if (!Array.isArray(segments) || segments.length === 0) {
+    return null;
+  }
+
+  const normalized = segments
+    .map((segment) => {
+      const startRaw = segment?.start ?? segment?.start_time ?? segment?.from ?? null;
+      const endRaw = segment?.end ?? segment?.end_time ?? segment?.to ?? null;
+      const start = typeof startRaw === 'number' ? startRaw : Number(startRaw);
+      const end = typeof endRaw === 'number' ? endRaw : Number(endRaw);
+      const text = typeof segment?.text === 'string' ? segment.text.trim() : '';
+      if (!Number.isFinite(start) || !Number.isFinite(end) || !text) {
+        return null;
+      }
+      return {
+        start,
+        end,
+        text,
+      };
+    })
+    .filter(Boolean) as Array<{ start: number; end: number; text: string }>;
+
+  if (!normalized.length) {
+    return null;
+  }
+
+  await fs.mkdir(projectTranscriptDir, { recursive: true });
+  const transcriptPath = path.join(projectTranscriptDir, `project-${projectId}.json`);
+  await fs.writeFile(transcriptPath, JSON.stringify(normalized, null, 2), 'utf-8');
+  return transcriptPath;
+}
+
 // Run the Python voice replacement pipeline
-async function runVoiceReplacementPipeline(inputVideoPath: string, outputVideoPath: string, promptWavPath: string): Promise<void> {
+async function runVoiceReplacementPipeline(
+  inputVideoPath: string,
+  outputVideoPath: string,
+  promptWavPath: string,
+  transcriptJsonPath?: string | null
+): Promise<void> {
   await fs.mkdir(path.dirname(outputVideoPath), { recursive: true });
 
   const pythonBin = process.env.PYTHON_BIN || 'python3';
@@ -73,6 +106,10 @@ async function runVoiceReplacementPipeline(inputVideoPath: string, outputVideoPa
     '--audio-prompt', promptWavPath,
     '--device', String(process.env.CHATTERBOX_DEVICE || 'cpu'),
   ];
+
+  if (transcriptJsonPath) {
+    args.push('--transcript-json', transcriptJsonPath);
+  }
 
   // Optional: override the Whisper model for transcription (e.g., tiny, base, small, medium)
   const whisperModel = process.env.WHISPER_MODEL;
@@ -226,24 +263,53 @@ router.post('/api/video-projects', authenticateToken, async (req: AuthRequest, r
     // Ensure required tables exist and verify template video exists
     await ensureTemplateVideosTable();
     const templateVideo = await db.get(sql`
-      SELECT id FROM template_videos WHERE id = ${templateVideoIdNumber} AND is_active = 1
+      SELECT id, metadata FROM template_videos WHERE id = ${templateVideoIdNumber} AND is_active = 1
     `);
 
     if (!templateVideo) {
       return res.status(404).json({ error: 'Template video not found' });
     }
 
+    const templateMetadata = parseMetadata(templateVideo.metadata);
+    const sourceVideoId = templateMetadata.sourceVideoId;
+    const pipelineStatus = templateMetadata.pipelineStatus ?? 'queued';
+    if (sourceVideoId && pipelineStatus === 'error') {
+      try {
+        const sourceVideo = await storage.getVideo(sourceVideoId);
+        if (sourceVideo?.videoUrl) {
+          await adminVideoPipelineService.enqueue(sourceVideo.id, sourceVideo.videoUrl);
+        }
+      } catch (err) {
+        console.warn('[video-projects] Requeue pipeline failed', {
+          templateId: templateVideoIdNumber,
+          sourceVideoId,
+          error: err instanceof Error ? err.message : err,
+        });
+      }
+    }
+
     await ensureVideoProjectsTable();
     await migrateVideoProjectsUserIdTypeIfNeeded();
 
     const now = new Date();
+    const baseMetadata = parseMetadata(metadata);
+    if (sourceVideoId) {
+      baseMetadata.sourceVideoId = sourceVideoId;
+      baseMetadata.sourcePipelineStatus = pipelineStatus;
+      baseMetadata.transcriptReady = pipelineStatus === 'completed';
+    }
+    const metadataPayload =
+      Object.keys(baseMetadata).length > 0
+        ? JSON.stringify(baseMetadata)
+        : null;
+
     const result = await db.run(sql`
       INSERT INTO video_projects (
         user_id, template_video_id, voice_profile_id, face_image_url,
         status, processing_progress, metadata, created_at, updated_at
       ) VALUES (
         ${userId}, ${templateVideoIdNumber}, ${voiceProfileId || null}, 
-        ${faceImageUrl || null}, 'pending', 0, ${metadata ? JSON.stringify(metadata) : null},
+        ${faceImageUrl || null}, 'pending', 0, ${metadataPayload},
         ${now.toISOString()}, ${now.toISOString()}
       )
     `);
@@ -281,6 +347,7 @@ router.post('/api/video-projects', authenticateToken, async (req: AuthRequest, r
         metadata: {
           projectId: insertedId,
           templateVideoId: templateVideoIdNumber,
+          ...(sourceVideoId ? { sourceVideoId } : {}),
         },
       } as any);
 
@@ -470,19 +537,14 @@ router.post('/api/video-projects/:id/process', authenticateToken, async (req: Au
 
     // Also mark the linked video as processing so it shows up in the library immediately
     const projectWithMeta = await db.get(sql`
-      SELECT vp.*, tv.title as template_title, tv.video_url as template_video_url, tv.thumbnail_url as template_thumbnail
+      SELECT vp.*, tv.title as template_title, tv.video_url as template_video_url, tv.thumbnail_url as template_thumbnail, tv.metadata as template_metadata
       FROM video_projects vp
       JOIN template_videos tv ON vp.template_video_id = tv.id
       WHERE vp.id = ${id}
     `);
 
-    let linkedVideoId: string | undefined;
-    try {
-      const meta = projectWithMeta?.metadata ? (typeof projectWithMeta.metadata === 'string' ? JSON.parse(projectWithMeta.metadata) : projectWithMeta.metadata) : {};
-      linkedVideoId = meta?.linkedVideoId;
-    } catch {
-      linkedVideoId = undefined;
-    }
+    const projectMeta = parseMetadata(projectWithMeta?.metadata);
+    let linkedVideoId: string | undefined = typeof projectMeta?.linkedVideoId === 'string' ? projectMeta.linkedVideoId : undefined;
 
     if (linkedVideoId) {
       try {
@@ -525,26 +587,49 @@ router.post('/api/video-projects/:id/process', authenticateToken, async (req: Au
         const outputVideoPath = toLocalUploadsPath(outputUrl);
         console.log('[processing] output video path:', outputVideoPath);
 
+        const templateMetadata = parseMetadata(projectWithMeta?.template_metadata);
+        const sourceVideoId =
+          projectMeta?.sourceVideoId ??
+          templateMetadata?.sourceVideoId ??
+          null;
+
+        let transcriptPath: string | null = null;
+        if (sourceVideoId) {
+          try {
+            const sourceVideo = await storage.getVideo(sourceVideoId);
+            if (sourceVideo?.metadata) {
+              const sourceMeta = parseMetadata((sourceVideo as any).metadata);
+              const transcriptSegments = (sourceMeta?.pipeline as any)?.transcription?.segments;
+              transcriptPath = await persistProjectTranscript(id, transcriptSegments);
+              if (transcriptPath) {
+                await setProjectProgress(id, 10, 'transcript_ready');
+              }
+            }
+          } catch (transcriptErr) {
+            console.warn('[processing] Unable to prepare transcript for project', {
+              projectId: id,
+              error: transcriptErr instanceof Error ? transcriptErr.message : transcriptErr,
+            });
+          }
+        }
+
         // Run the Python voice replacement pipeline
-        await setProjectProgress(id, 15, 'pipeline_spawn');
-        await runVoiceReplacementPipeline(inputVideoPath, outputVideoPath, promptPath);
+        await setProjectProgress(id, transcriptPath ? 20 : 15, 'pipeline_spawn');
+        await runVoiceReplacementPipeline(inputVideoPath, outputVideoPath, promptPath, transcriptPath);
 
         const completionTimestamp = new Date().toISOString();
         // Update project record on success
-        let meta: any = null;
-        try {
-          meta = projectWithMeta?.metadata
-            ? typeof projectWithMeta.metadata === 'string'
-              ? JSON.parse(projectWithMeta.metadata)
-              : projectWithMeta.metadata
-            : {};
-        } catch {
-          meta = {};
-        }
+        let meta = parseMetadata(projectWithMeta?.metadata);
         const history = Array.isArray(meta?.processingHistory) ? meta.processingHistory : [];
         history.push({ status: 'completed', timestamp: completionTimestamp });
         meta.processingHistory = history;
         meta.processingCompletedAt = completionTimestamp;
+        if (sourceVideoId) {
+          meta.sourceVideoId = sourceVideoId;
+        }
+        if (transcriptPath) {
+          meta.transcriptPath = transcriptPath;
+        }
 
         await db.run(sql`
           UPDATE video_projects

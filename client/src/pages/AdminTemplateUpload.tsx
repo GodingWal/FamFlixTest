@@ -21,6 +21,15 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
 
+type TemplateVideoMetadata = {
+  pipelineStatus?: string;
+  pipeline?: {
+    status?: string;
+    error?: string;
+  };
+  sourceVideoId?: string;
+};
+
 type TemplateVideo = {
   id: number;
   title: string;
@@ -33,6 +42,7 @@ type TemplateVideo = {
   difficulty?: string;
   isActive?: boolean;
   createdAt?: string;
+  metadata?: TemplateVideoMetadata;
 };
 
 const difficultyOptions = [
@@ -169,6 +179,22 @@ export default function AdminTemplateUpload() {
   const templatesCount = videos.length;
   const activeTemplates = videos.filter((video) => video.isActive !== false).length;
   const lastUploadedAt = videos[0]?.createdAt ? new Date(videos[0].createdAt).toLocaleDateString() : '—';
+  const readyTemplates = videos.filter((video) => video.metadata?.pipelineStatus === 'completed').length;
+  const processingTemplates = videos.filter((video) => !video.metadata?.pipelineStatus || video.metadata?.pipelineStatus !== 'completed').length;
+
+  const getPipelineBadge = (metadata?: TemplateVideoMetadata) => {
+    const status = metadata?.pipelineStatus ?? 'queued';
+    switch (status) {
+      case 'completed':
+        return <Badge variant="secondary" className="bg-green-600/10 text-green-600 border-green-600/20">Ready</Badge>;
+      case 'error':
+        return <Badge variant="destructive">Needs attention</Badge>;
+      case 'processing':
+        return <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-amber-500/20">Processing</Badge>;
+      default:
+        return <Badge variant="outline">Queued</Badge>;
+    }
+  };
 
   const handleCategoryChip = (value: string) => {
     setCategory(value);
@@ -280,7 +306,7 @@ export default function AdminTemplateUpload() {
             <div>
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Sparkles className="h-4 w-4 text-primary" />
-                Curated Template Library
+                Curated Video Library
               </div>
               <h1 className="mt-3 text-3xl font-semibold tracking-tight text-foreground lg:text-4xl">
                 Upload new cinematic templates
@@ -299,6 +325,14 @@ export default function AdminTemplateUpload() {
                 <Badge variant="outline" className="gap-1">
                   <Sparkles className="h-3.5 w-3.5" />
                   {activeTemplates} live
+                </Badge>
+              </div>
+              <div className="flex items-center gap-3">
+                <Badge variant="secondary" className="gap-1 bg-green-500/10 text-green-600 border-green-500/20">
+                  Ready transcripts: {readyTemplates}
+                </Badge>
+                <Badge variant="outline" className="gap-1 text-amber-600 border-amber-500/40">
+                  Processing: {processingTemplates}
                 </Badge>
               </div>
               <p className="font-medium text-foreground">Latest update</p>
@@ -523,7 +557,7 @@ export default function AdminTemplateUpload() {
           <CardHeader>
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <CardTitle>Template library</CardTitle>
+                <CardTitle>Video library</CardTitle>
                 <CardDescription>Filter and review the catalog families explore.</CardDescription>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -602,9 +636,12 @@ export default function AdminTemplateUpload() {
                       )}
                       <div className="flex items-start justify-between gap-2">
                         <p className="text-sm font-semibold text-foreground line-clamp-2">{video.title}</p>
-                        <Badge variant={video.isActive === false ? 'outline' : 'secondary'}>
-                          {video.isActive === false ? 'Inactive' : 'Live'}
-                        </Badge>
+                        <div className="flex flex-col items-end gap-1">
+                          <Badge variant={video.isActive === false ? 'outline' : 'secondary'}>
+                            {video.isActive === false ? 'Inactive' : 'Live'}
+                          </Badge>
+                          {getPipelineBadge(video.metadata)}
+                        </div>
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground line-clamp-2">{video.description || 'No description provided.'}</p>
                       <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">

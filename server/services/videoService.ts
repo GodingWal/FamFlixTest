@@ -1,6 +1,20 @@
 import { storage } from "../storage";
 import { InsertVideo } from "../db/schema";
 import { aiService } from "./aiService";
+import { config } from "../config";
+import { logger } from "../utils/logger-simple";
+import path from "path";
+import fs from "fs/promises";
+import { nanoid } from "nanoid";
+import type { Express } from "express";
+
+interface ProcessedVideoUploadResult {
+  videoUrl: string;
+  localPath: string;
+  thumbnail: string | null;
+  duration: number | null;
+  metadata: Record<string, unknown>;
+}
 
 export class VideoService {
   async createVideo(videoData: InsertVideo) {
@@ -71,24 +85,40 @@ export class VideoService {
     return await aiService.generateVideoSuggestions(familyData);
   }
 
-  async processVideoUpload(videoFile: Buffer, metadata: any) {
-    // In a real implementation, this would:
-    // 1. Upload video to cloud storage
-    // 2. Extract video metadata (duration, dimensions, etc.)
-    // 3. Generate thumbnail
-    // 4. Process video for different formats/qualities
-    
-    // For now, simulate processing
+  async processVideoUpload(videoFile: Express.Multer.File): Promise<ProcessedVideoUploadResult> {
+    if (!videoFile?.buffer?.length) {
+      throw new Error("Video file buffer is empty");
+    }
+
+    const uploadsRoot = path.resolve(process.cwd(), config.UPLOAD_DIR ?? "uploads");
+    const videosDir = path.join(uploadsRoot, "videos");
+    await fs.mkdir(videosDir, { recursive: true });
+
+    const originalExt = path.extname(videoFile.originalname || "") || ".mp4";
+    const safeExt = originalExt.replace(/[^a-zA-Z0-9.]/g, "") || ".mp4";
+    const fileName = `admin-${Date.now()}-${nanoid(8)}${safeExt}`;
+    const filePath = path.join(videosDir, fileName);
+
+    await fs.writeFile(filePath, videoFile.buffer);
+    logger.info("Stored admin video upload", {
+      destination: filePath,
+      fileSize: videoFile.size,
+    });
+
+    const videoUrl = `/uploads/videos/${fileName}`;
+    const metadata: Record<string, unknown> = {
+      originalName: videoFile.originalname,
+      mimeType: videoFile.mimetype,
+      size: videoFile.size,
+      uploadedAt: new Date().toISOString(),
+    };
+
     return {
-      videoUrl: `/temp/video-${Date.now()}.mp4`,
-      thumbnail: `/temp/thumbnail-${Date.now()}.jpg`,
-      duration: 180, // 3 minutes
-      metadata: {
-        width: 1920,
-        height: 1080,
-        format: "mp4",
-        size: videoFile.length,
-      },
+      videoUrl,
+      localPath: filePath,
+      thumbnail: null,
+      duration: null,
+      metadata,
     };
   }
 

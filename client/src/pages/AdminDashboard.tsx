@@ -111,6 +111,7 @@ const AdminDashboard: React.FC = () => {
   });
 
   const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
+  const safeManagedUsers = Array.isArray(managedUsers) ? managedUsers : [];
 
   const updateUserRole = useMutation({
     mutationFn: async ({ userId, role }: { userId: string; role: 'user' | 'admin' }) => {
@@ -163,8 +164,8 @@ const AdminDashboard: React.FC = () => {
 
   const quickActions = [
     {
-      title: 'Upload Templates',
-      description: 'Add new curated templates to the public catalog.',
+      title: 'Upload Video',
+      description: 'Add new curated videos to the public catalog.',
       href: '/admin/upload-templates',
       icon: Upload,
     },
@@ -182,12 +183,15 @@ const AdminDashboard: React.FC = () => {
     },
     {
       title: 'Review Catalog',
-      description: 'Preview how families experience the template library.',
-      href: '/video-selection',
+      description: 'Preview and manage the video library.',
+      href: '/admin/video-library',
       icon: LayoutDashboard,
     },
   ];
 
+  const recentUsers = stats?.recentUsers ?? [];
+  const recentVoiceJobs = stats?.recentVoiceJobs ?? [];
+  const recentTemplateVideos = stats?.recentTemplateVideos ?? [];
   const activeVoiceJobs = stats?.activeVoiceJobs ?? 0;
   const completedVoiceJobs = stats?.completedVoiceJobs ?? 0;
   const failedVoiceJobs = stats?.failedVoiceJobs ?? 0;
@@ -252,8 +256,8 @@ const AdminDashboard: React.FC = () => {
   if (stats && stats.totalTemplateVideos < 6) {
     alerts.push({
       severity: 'info',
-      title: 'Template library running light',
-      description: 'Consider uploading fresh templates to keep the catalog vibrant.',
+      title: 'Video library running light',
+      description: 'Consider uploading fresh videos to keep the catalog vibrant.',
     });
   }
 
@@ -262,7 +266,7 @@ const AdminDashboard: React.FC = () => {
   }, [queryClient]);
 
   const handleExportUsers = useCallback(() => {
-    if (!managedUsers.length) {
+    if (!safeManagedUsers.length) {
       toast({
         title: 'Nothing to export',
         description: 'Load the team directory before exporting.',
@@ -271,7 +275,7 @@ const AdminDashboard: React.FC = () => {
     }
 
     const headers = ['Email', 'Role', 'Voice Jobs', 'Voice Profiles', 'Joined'];
-    const rows = managedUsers.map((managedUser) => [
+    const rows = safeManagedUsers.map((managedUser) => [
       managedUser.email,
       managedUser.role,
       managedUser.voice_jobs_count,
@@ -302,9 +306,9 @@ const AdminDashboard: React.FC = () => {
 
     toast({
       title: 'Export ready',
-      description: `Downloaded ${managedUsers.length} user record${managedUsers.length === 1 ? '' : 's'}.`,
+      description: `Downloaded ${safeManagedUsers.length} user record${safeManagedUsers.length === 1 ? '' : 's'}.`,
     });
-  }, [managedUsers, toast]);
+  }, [safeManagedUsers, toast]);
 
   const handleRoleChange = useCallback(
     (managedUser: ManagedUser, role: 'user' | 'admin') => {
@@ -360,7 +364,7 @@ const AdminDashboard: React.FC = () => {
               <Button variant="outline" asChild>
                 <Link href="/admin/upload-templates">
                   <Upload className="mr-2 h-4 w-4" />
-                  Upload Templates
+                  Upload Video
                 </Link>
               </Button>
               <Button variant="outline" asChild>
@@ -448,7 +452,7 @@ const AdminDashboard: React.FC = () => {
                     <Card className="relative overflow-hidden">
                       <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-emerald-500 via-emerald-300/60 to-transparent" />
                       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle className="text-sm font-medium">Template Library</CardTitle>
+                        <CardTitle className="text-sm font-medium">Video Library</CardTitle>
                         <Video className="h-4 w-4 text-muted-foreground" />
                       </CardHeader>
                       <CardContent>
@@ -560,8 +564,8 @@ const AdminDashboard: React.FC = () => {
                         <div>
                           <p className="text-sm font-medium text-foreground">New Families Onboarded</p>
                           <p className="text-xs text-muted-foreground">
-                            {stats.recentUsers.length
-                              ? `${stats.recentUsers.length} users joined recently`
+                            {recentUsers.length
+                              ? `${recentUsers.length} users joined recently`
                               : 'No new sign-ups in the last cycle'}
                           </p>
                         </div>
@@ -571,9 +575,9 @@ const AdminDashboard: React.FC = () => {
                           <Video className="h-4 w-4" />
                         </div>
                         <div>
-                          <p className="text-sm font-medium text-foreground">Template Coverage</p>
+                          <p className="text-sm font-medium text-foreground">Video Coverage</p>
                           <p className="text-xs text-muted-foreground">
-                            {stats.totalTemplateVideos} templates across all categories.
+                            {stats.totalTemplateVideos} videos across all categories.
                           </p>
                         </div>
                       </div>
@@ -691,8 +695,8 @@ const AdminDashboard: React.FC = () => {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {managedUsers.length ? (
-                            managedUsers.slice(0, 8).map((managedUser) => (
+                          {safeManagedUsers.length ? (
+                            safeManagedUsers.slice(0, 8).map((managedUser) => (
                               <TableRow key={managedUser.id}>
                                 <TableCell className="font-medium">{managedUser.email}</TableCell>
                                 <TableCell>
@@ -717,7 +721,7 @@ const AdminDashboard: React.FC = () => {
                                 </TableCell>
                               </TableRow>
                             ))
-                          ) : (
+                            ) : (
                             <TableRow>
                               <TableCell colSpan={5} className="py-8 text-center text-sm text-muted-foreground">
                                 No users loaded yet.
@@ -742,9 +746,9 @@ const AdminDashboard: React.FC = () => {
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <Button asChild variant="secondary" className="w-full justify-start gap-2">
-                      <Link href="/admin/upload-templates">
+                      <Link href="/admin/video-library">
                         <Upload className="h-4 w-4" />
-                        Curate Template Library
+                        Manage Video Library
                       </Link>
                     </Button>
                     <Button asChild variant="secondary" className="w-full justify-start gap-2">
@@ -778,8 +782,8 @@ const AdminDashboard: React.FC = () => {
                   </CardHeader>
                   <CardContent>
                     <div className="divide-y divide-border/60">
-                      {stats.recentUsers.length ? (
-                        stats.recentUsers.slice(0, 5).map((recentUser) => (
+                      {recentUsers.length ? (
+                        recentUsers.slice(0, 5).map((recentUser) => (
                           <div key={recentUser.id} className="flex items-center justify-between py-3">
                             <div>
                               <p className="text-sm font-medium text-foreground">{recentUser.email}</p>
@@ -806,8 +810,8 @@ const AdminDashboard: React.FC = () => {
                   </CardHeader>
                   <CardContent>
                     <div className="divide-y divide-border/60">
-                      {stats.recentVoiceJobs.length ? (
-                        stats.recentVoiceJobs.slice(0, 5).map((job) => (
+                      {recentVoiceJobs.length ? (
+                        recentVoiceJobs.slice(0, 5).map((job) => (
                           <div key={job.id} className="flex items-center justify-between py-3">
                             <div>
                               <p className="text-sm font-medium text-foreground">{job.name}</p>
@@ -827,13 +831,13 @@ const AdminDashboard: React.FC = () => {
 
                 <Card>
                   <CardHeader>
-                    <CardTitle>Recent Template Videos</CardTitle>
+                    <CardTitle>Recent Video Uploads</CardTitle>
                     <CardDescription>Fresh launches ready for families to explore.</CardDescription>
                   </CardHeader>
                   <CardContent>
                     <div className="divide-y divide-border/60">
-                      {stats.recentTemplateVideos.length ? (
-                        stats.recentTemplateVideos.slice(0, 5).map((video) => (
+                      {recentTemplateVideos.length ? (
+                        recentTemplateVideos.slice(0, 5).map((video) => (
                           <div key={video.id} className="flex items-center justify-between py-3">
                             <div>
                               <p className="text-sm font-medium text-foreground">{video.title}</p>
@@ -844,7 +848,7 @@ const AdminDashboard: React.FC = () => {
                           </div>
                         ))
                       ) : (
-                        <p className="py-6 text-sm text-muted-foreground">No new templates published.</p>
+                        <p className="py-6 text-sm text-muted-foreground">No new videos published.</p>
                       )}
                     </div>
                   </CardContent>

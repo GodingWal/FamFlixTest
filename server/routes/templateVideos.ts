@@ -5,6 +5,9 @@ import multer from 'multer';
 import fs from 'fs/promises';
 import path from 'path';
 import { authenticateToken, AuthRequest } from '../middleware/auth-simple.js';
+import { storage } from '../storage';
+import { adminVideoPipelineService } from '../services/adminVideoPipelineService';
+import { ensureTemplateVideosTable } from '../utils/templateVideos';
 
 const router = Router();
 
@@ -18,24 +21,34 @@ async function ensureUploadDirs() {
   await fs.mkdir(thumbnailsDir, { recursive: true });
 }
 
-// Ensure template_videos table exists (runtime guard)
-async function ensureTemplateVideosTable() {
-  await db.run(sql`
-    CREATE TABLE IF NOT EXISTS template_videos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      description TEXT,
-      thumbnail_url TEXT,
-      video_url TEXT NOT NULL,
-      duration INTEGER,
-      category TEXT DEFAULT 'general',
-      tags TEXT DEFAULT '[]',
-      difficulty TEXT DEFAULT 'easy',
-      is_active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
+async function safeUnlinkByUrl(fileUrl?: string | null) {
+  if (!fileUrl || !fileUrl.startsWith('/uploads/')) {
+    return;
+  }
+  const filePath = path.join(process.cwd(), fileUrl.replace(/^\/+/,'') );
+  try {
+    await fs.unlink(filePath);
+  } catch (error: any) {
+    if (error?.code !== 'ENOENT') {
+      console.warn('[templateVideos] Failed to remove file', filePath, error);
+    }
+  }
+}
+
+function parseMetadata(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? { ...parsed } : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  return {};
 }
 
 // Multer config (memory storage, we write to disk)
@@ -58,6 +71,8 @@ const mapTemplateVideoRow = (row: any) => {
     }
   }
 
+  const metadata = parseMetadata(row.metadata);
+
   return {
     id: row.id,
     title: row.title,
@@ -71,6 +86,7 @@ const mapTemplateVideoRow = (row: any) => {
     isActive: row.is_active === 1 || row.is_active === true,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    metadata,
   };
 };
 
@@ -137,7 +153,15 @@ router.post('/api/template-videos', authenticateToken, upload.fields([
   { name: 'video', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 },
 ]), async (req: AuthRequest, res) => {
+  let destPath: string | null = null;
+  let createdThumbnailPath: string | null = null;
+  let templateId: number | null = null;
+  let adminVideoId: string | null = null;
   try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied. Admin privileges required.' });
+    }
+
     await ensureUploadDirs();
     await ensureTemplateVideosTable();
 
@@ -155,28 +179,28 @@ router.post('/api/template-videos', authenticateToken, upload.fields([
 
     const safeBase = String(title).toLowerCase().replace(/[^a-z0-9-_]+/g, '-').slice(0, 60) || 'video';
     const filename = `${Date.now()}_${safeBase}.mp4`;
-    const destPath = path.join(videosDir, filename);
+    destPath = path.join(videosDir, filename);
     await fs.writeFile(destPath, videoFile.buffer);
 
     const videoUrl = `/uploads/videos/${filename}`;
     const tagsJson = typeof tags === 'string' ? tags : JSON.stringify(tags ?? []);
     const durationNum = duration ? Number(duration) : null;
     let thumbnailUrl: string | null = null;
-
     if (thumbnailFile) {
       const thumbExt = path.extname(thumbnailFile.originalname) || '.jpg';
       const thumbFilename = `${Date.now()}_${safeBase}${thumbExt}`;
       const thumbDest = path.join(thumbnailsDir, thumbFilename);
       await fs.writeFile(thumbDest, thumbnailFile.buffer);
       thumbnailUrl = `/uploads/thumbnails/${thumbFilename}`;
+      createdThumbnailPath = thumbDest;
     }
 
     const nowIso = new Date().toISOString();
     const result = await db.run(sql`
       INSERT INTO template_videos (
-        title, description, thumbnail_url, video_url, duration, category, tags, difficulty, is_active, created_at, updated_at
+        title, description, thumbnail_url, video_url, duration, category, tags, difficulty, is_active, metadata, created_at, updated_at
       ) VALUES (
-        ${title}, ${description ?? null}, ${thumbnailUrl}, ${videoUrl}, ${durationNum}, ${category}, ${tagsJson}, ${difficulty}, 1, ${nowIso}, ${nowIso}
+        ${title}, ${description ?? null}, ${thumbnailUrl}, ${videoUrl}, ${durationNum}, ${category}, ${tagsJson}, ${difficulty}, 1, ${JSON.stringify({})}, ${nowIso}, ${nowIso}
       )
     `);
 
@@ -184,10 +208,187 @@ router.post('/api/template-videos', authenticateToken, upload.fields([
       SELECT * FROM template_videos WHERE id = ${result.lastInsertRowid}
     `);
 
-    res.status(201).json(mapTemplateVideoRow(inserted));
+    if (!inserted) {
+      throw new Error('Failed to retrieve inserted template video');
+    }
+    templateId = inserted.id;
+
+    // Create a matching admin-provided video entry for pipeline processing
+    const adminVideo = await storage.createAdminProvidedVideo({
+      title,
+      description: description ?? null,
+      thumbnail: thumbnailUrl,
+      videoUrl,
+      duration: durationNum,
+      status: 'processing',
+      familyId: null,
+      createdBy: req.user!.id,
+      metadata: {
+        source: 'template_video',
+        templateId: inserted.id,
+      },
+    } as any);
+    adminVideoId = adminVideo.id;
+
+    const templateMetadata = {
+      sourceVideoId: adminVideo.id,
+      pipelineStatus: 'queued',
+    };
+
+    await db.run(sql`
+      UPDATE template_videos
+      SET metadata = ${JSON.stringify(templateMetadata)}, updated_at = ${new Date().toISOString()}
+      WHERE id = ${inserted.id}
+    `);
+
+    try {
+      await adminVideoPipelineService.enqueue(adminVideo.id, adminVideo.videoUrl);
+    } catch (pipelineError) {
+      console.error('Failed to enqueue admin pipeline for template video:', pipelineError);
+      if (templateId) {
+        await db.run(sql`
+          DELETE FROM template_videos WHERE id = ${templateId}
+        `);
+      }
+      if (destPath) {
+        await fs.unlink(destPath).catch(() => undefined);
+      }
+      if (createdThumbnailPath) {
+        await fs.unlink(createdThumbnailPath).catch(() => undefined);
+      }
+      if (adminVideoId) {
+        await storage.deleteVideo(adminVideoId).catch(() => undefined);
+      }
+      return res.status(500).json({ error: 'Template video saved, but preprocessing pipeline failed to start.' });
+    }
+
+    const updated = await db.get(sql`
+      SELECT * FROM template_videos WHERE id = ${inserted.id}
+    `);
+
+    res.status(201).json(mapTemplateVideoRow(updated));
   } catch (error) {
     console.error('Upload template video error:', error);
+    if (templateId) {
+      await db.run(sql`
+        DELETE FROM template_videos WHERE id = ${templateId}
+      `).catch(() => undefined);
+    }
+    if (destPath) {
+      await fs.unlink(destPath).catch(() => undefined);
+    }
+    if (createdThumbnailPath) {
+      await fs.unlink(createdThumbnailPath).catch(() => undefined);
+    }
+    if (adminVideoId) {
+      await storage.deleteVideo(adminVideoId).catch(() => undefined);
+    }
     res.status(500).json({ error: 'Failed to upload video' });
+  }
+});
+
+router.patch('/api/template-videos/:id', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied. Admin privileges required.' });
+    }
+
+    await ensureTemplateVideosTable();
+    const { id } = req.params;
+    const video = await db.get(sql`SELECT * FROM template_videos WHERE id = ${id}`);
+    if (!video) {
+      return res.status(404).json({ error: 'Template video not found' });
+    }
+
+    const { title, description, category, difficulty, duration, tags, isActive } = req.body ?? {};
+    const assignments: any[] = [];
+
+    if (title !== undefined) {
+      assignments.push(sql`title = ${title}`);
+    }
+    if (description !== undefined) {
+      assignments.push(sql`description = ${description}`);
+    }
+    if (category !== undefined) {
+      assignments.push(sql`category = ${category}`);
+    }
+    if (difficulty !== undefined) {
+      assignments.push(sql`difficulty = ${difficulty}`);
+    }
+    if (duration !== undefined) {
+      const durationValueRaw = duration === null || duration === '' ? null : Number(duration);
+      const durationValue = durationValueRaw === null || Number.isFinite(durationValueRaw) ? durationValueRaw : null;
+      assignments.push(sql`duration = ${durationValue}`);
+    }
+    if (tags !== undefined) {
+      let tagsValue: string;
+      if (Array.isArray(tags)) {
+        tagsValue = JSON.stringify(tags);
+      } else if (typeof tags === 'string') {
+        try {
+          JSON.parse(tags);
+          tagsValue = tags;
+        } catch {
+          const splitTags = tags.split(',').map((tag) => tag.trim()).filter(Boolean);
+          tagsValue = JSON.stringify(splitTags);
+        }
+      } else {
+        tagsValue = JSON.stringify([]);
+      }
+      assignments.push(sql`tags = ${tagsValue}`);
+    }
+    if (isActive !== undefined) {
+      const activeValue = typeof isActive === 'boolean' ? (isActive ? 1 : 0) : Number(isActive) ? 1 : 0;
+      assignments.push(sql`is_active = ${activeValue}`);
+    }
+
+    if (!assignments.length) {
+      return res.status(400).json({ error: 'No updates provided' });
+    }
+
+    assignments.push(sql`updated_at = ${new Date().toISOString()}`);
+
+    await db.run(sql`
+      UPDATE template_videos
+      SET ${sql.join(assignments, sql`, `)}
+      WHERE id = ${id}
+    `);
+
+    const updated = await db.get(sql`SELECT * FROM template_videos WHERE id = ${id}`);
+    res.json(mapTemplateVideoRow(updated));
+  } catch (error) {
+    console.error('Update template video error:', error);
+    res.status(500).json({ error: 'Failed to update template video' });
+  }
+});
+
+router.delete('/api/template-videos/:id', authenticateToken, async (req: AuthRequest, res) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Access denied. Admin privileges required.' });
+    }
+
+    await ensureTemplateVideosTable();
+    const { id } = req.params;
+    const template = await db.get(sql`SELECT * FROM template_videos WHERE id = ${id}`);
+    if (!template) {
+      return res.status(404).json({ error: 'Template video not found' });
+    }
+
+    await db.run(sql`DELETE FROM template_videos WHERE id = ${id}`);
+
+    await safeUnlinkByUrl(template.video_url);
+    await safeUnlinkByUrl(template.thumbnail_url);
+
+    const meta = parseMetadata(template.metadata);
+    if (meta.sourceVideoId) {
+      await storage.deleteVideo(meta.sourceVideoId).catch(() => undefined);
+    }
+
+    res.json({ message: 'Template video deleted' });
+  } catch (error) {
+    console.error('Delete template video error:', error);
+    res.status(500).json({ error: 'Failed to delete template video' });
   }
 });
 

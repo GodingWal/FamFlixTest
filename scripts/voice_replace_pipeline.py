@@ -39,23 +39,19 @@ import argparse
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 import requests
 
 try:
-    import whisper
-except ImportError:  # pragma: no cover - whisper is an optional dependency at runtime
-    pass
-
-try:
     from pydub import AudioSegment
+    from pydub.effects import normalize
 except ImportError as exc:  # pragma: no cover - pydub is an optional dependency at runtime
     raise SystemExit(
         "The `pydub` package is required for audio assembly.\n"
@@ -144,6 +140,7 @@ def transcribe_with_openai_whisper(
     model_name: str,
     device: Optional[str] = None,
     temperature: float = 0.0,
+    word_timestamps: bool = True,
 ) -> List[TranscriptSegment]:
     """Transcribe using the original openai-whisper package."""
     try:
@@ -155,7 +152,13 @@ def transcribe_with_openai_whisper(
         ) from exc
 
     model = whisper.load_model(model_name, device=device)
-    result = model.transcribe(str(audio_path), temperature=temperature, verbose=False)
+    result = model.transcribe(
+        str(audio_path),
+        temperature=temperature,
+        verbose=False,
+        word_timestamps=word_timestamps,
+        initial_prompt=None,
+    )
     segments = [
         TranscriptSegment(start=seg.get("start", 0.0), end=seg.get("end", 0.0), text=str(seg.get("text", "")).strip())
         for seg in result.get("segments", [])
@@ -175,6 +178,7 @@ def transcribe_with_faster_whisper(
     device: Optional[str] = None,
     compute_type: Optional[str] = None,
     beam_size: int = 5,
+    word_timestamps: bool = True,
 ) -> List[TranscriptSegment]:
     """Transcribe using faster-whisper (CTranslate2 backend)."""
     try:
@@ -190,7 +194,11 @@ def transcribe_with_faster_whisper(
     ct2_compute = compute_type or ("float16" if ct2_device == "cuda" else "int8")
 
     model = WhisperModel(model_name, device=ct2_device, compute_type=ct2_compute)
-    segments_iter, _info = model.transcribe(str(audio_path), beam_size=beam_size)
+    segments_iter, _info = model.transcribe(
+        str(audio_path),
+        beam_size=beam_size,
+        word_timestamps=word_timestamps,
+    )
     segments_list = list(segments_iter)
     segments: List[TranscriptSegment] = [
         TranscriptSegment(start=float(getattr(seg, "start", 0.0)), end=float(getattr(seg, "end", 0.0)), text=str(getattr(seg, "text", "")).strip())
@@ -214,9 +222,12 @@ def transcribe_with_whisper_cpp(
     threads: Optional[int] = None,
 ) -> List[TranscriptSegment]:
     """Transcribe using whisper.cpp CLI (requires compiled binary and ggml model)."""
-    bin_path = binary_path or Path(os.environ.get("WHISPER_CPP_BIN", ""))
+    bin_path = binary_path
     if not bin_path:
-        # Try to find common binary names in PATH
+        env_candidate = os.environ.get("WHISPER_CPP_BIN")
+        if env_candidate:
+            bin_path = Path(env_candidate)
+    if not bin_path:
         for candidate in ["whisper-cpp", "whisper", "main"]:
             found = shutil.which(candidate)
             if found:
@@ -243,27 +254,28 @@ def transcribe_with_whisper_cpp(
     if threads and threads > 0:
         cmd += ["-t", str(threads)]
 
-    # Run with timeout to avoid long stalls on CPU
-    timeout_sec = int(os.environ.get("CHATTERBOX_TIMEOUT", "90"))
+    timeout_sec = max(30, int(os.environ.get("WHISPER_CPP_TIMEOUT", "120")))
     try:
         result = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout_sec)
     except subprocess.TimeoutExpired:
-        # Fallback: retry with smaller settings
-        fallback_cmd = list(cmd)
-        # Force conservative params
-        if "--steps" in fallback_cmd:
-            idx = fallback_cmd.index("--steps")
-            if idx >= 0 and idx + 1 < len(fallback_cmd):
-                fallback_cmd[idx + 1] = "6"
-        else:
-            fallback_cmd.extend(["--steps", "6"])
-        if "--max-new-tokens" in fallback_cmd:
-            idx = fallback_cmd.index("--max-new-tokens")
-            if idx >= 0 and idx + 1 < len(fallback_cmd):
-                fallback_cmd[idx + 1] = "16"
-        else:
-            fallback_cmd.extend(["--max-new-tokens", "16"])
-        result = subprocess.run(fallback_cmd, check=False, capture_output=True, text=True, timeout=max(30, timeout_sec // 2))
+        fallback_cmd = list(cmd) + ["--beam-size", "1", "--best-of", "1"]
+        fallback_timeout = max(30, timeout_sec // 2)
+        try:
+            result = subprocess.run(
+                fallback_cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=fallback_timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise PipelineError(
+                f"whisper.cpp timed out after {timeout_sec}s (fallback timeout {fallback_timeout}s)."
+            ) from exc
+        if result.returncode != 0:
+            raise PipelineError(
+                f"whisper.cpp fallback failed: {result.stderr.strip() or result.stdout.strip()}"
+            )
     if result.returncode != 0:
         raise PipelineError(f"whisper.cpp failed: {result.stderr or result.stdout}")
 
@@ -282,11 +294,18 @@ def transcribe_with_whisper_cpp(
         raise PipelineError(f"Failed to parse whisper.cpp JSON: {exc}") from exc
 
     segments: List[TranscriptSegment] = []
-    # Expecting data structure with "segments" list
-    items = data.get("segments") if isinstance(data, dict) else None
+    items: Any
+    if isinstance(data, dict):
+        items = data.get("segments") or data.get("result") or []
+    else:
+        items = data
+
+    if isinstance(items, dict):
+        items = items.get("segments", [])
+    if isinstance(items, Iterable) and not isinstance(items, list):
+        items = list(items)
     if not isinstance(items, list):
-        # Some builds output a list of segments directly
-        items = data if isinstance(data, list) else []
+        items = []
     for seg in items:
         try:
             start = float(seg.get("start", 0.0))
@@ -311,6 +330,7 @@ def transcribe_audio(
     ct2_device: Optional[str] = None,
     ct2_compute: Optional[str] = None,
     ct2_beam_size: int = 5,
+    word_timestamps: bool = True,
     workdir: Optional[Path] = None,
     whisper_cpp_bin: Optional[Path] = None,
     whisper_cpp_model: Optional[Path] = None,
@@ -327,6 +347,7 @@ def transcribe_audio(
             device=ct2_device or device,
             compute_type=ct2_compute,
             beam_size=max(1, int(ct2_beam_size)),
+            word_timestamps=word_timestamps,
         )
     elif backend == "whisper":
         return transcribe_with_openai_whisper(
@@ -334,22 +355,27 @@ def transcribe_audio(
             model_name=model_name,
             device=device,
             temperature=temperature,
+            word_timestamps=word_timestamps,
         )
     elif backend in ("whisper-cpp", "whisper_cpp"):
-        cpp_bin = whisper_cpp_bin or (Path(os.environ["WHISPER_CPP_BIN"]) if "WHISPER_CPP_BIN" in os.environ else None)
-        cpp_model = whisper_cpp_model or (Path(os.environ["WHISPER_CPP_MODEL"]) if "WHISPER_CPP_MODEL" in os.environ else None)
+        env_bin = Path(os.environ["WHISPER_CPP_BIN"]) if os.environ.get("WHISPER_CPP_BIN") else None
+        env_model = Path(os.environ["WHISPER_CPP_MODEL"]) if os.environ.get("WHISPER_CPP_MODEL") else None
+        env_threads = os.environ.get("WHISPER_CPP_THREADS")
+        cpp_bin = whisper_cpp_bin or env_bin
+        cpp_model = whisper_cpp_model or env_model
+        threads = whisper_cpp_threads or (int(env_threads) if env_threads else None)
         if not cpp_model:
-            raise PipelineError("WHISPER_CPP_MODEL is required for whisper-cpp backend (path to ggml model)")
+            raise PipelineError("WHISPER_CPP_MODEL (or --whisper-cpp-model) is required for whisper-cpp backend")
         return transcribe_with_whisper_cpp(
             audio_path,
             model_path=cpp_model,
             binary_path=cpp_bin,
             workdir=workdir,
             language=language,
-            threads=whisper_cpp_threads,
+            threads=threads,
         )
     elif backend == "auto":
-        # Try faster-whisper first, then fall back to openai-whisper
+        # Try faster-whisper first, then fall back to other implementations
         try:
             return transcribe_with_faster_whisper(
                 audio_path,
@@ -357,20 +383,25 @@ def transcribe_audio(
                 device=ct2_device or device,
                 compute_type=ct2_compute,
                 beam_size=max(1, int(ct2_beam_size)),
+                word_timestamps=word_timestamps,
             )
         except PipelineError:
-            # Optionally try whisper.cpp if env is configured
-            cpp_bin_env = Path(os.environ["WHISPER_CPP_BIN"]) if "WHISPER_CPP_BIN" in os.environ else None
-            cpp_model_env = Path(os.environ["WHISPER_CPP_MODEL"]) if "WHISPER_CPP_MODEL" in os.environ else None
-            if cpp_model_env:
+            # Optionally try whisper.cpp if CLI args or env vars are configured
+            env_bin = Path(os.environ["WHISPER_CPP_BIN"]) if "WHISPER_CPP_BIN" in os.environ else None
+            env_model = Path(os.environ["WHISPER_CPP_MODEL"]) if "WHISPER_CPP_MODEL" in os.environ else None
+            env_threads = os.environ.get("WHISPER_CPP_THREADS")
+            cpp_bin = whisper_cpp_bin or env_bin
+            cpp_model = whisper_cpp_model or env_model
+            threads = whisper_cpp_threads or (int(env_threads) if env_threads else None)
+            if cpp_model:
                 try:
                     return transcribe_with_whisper_cpp(
                         audio_path,
-                        model_path=cpp_model_env,
-                        binary_path=cpp_bin_env,
+                        model_path=cpp_model,
+                        binary_path=cpp_bin,
                         workdir=workdir,
                         language=language,
-                        threads=whisper_cpp_threads,
+                        threads=threads,
                     )
                 except PipelineError:
                     pass
@@ -379,10 +410,11 @@ def transcribe_audio(
                 model_name=model_name,
                 device=device,
                 temperature=temperature,
+                word_timestamps=word_timestamps,
             )
     else:
         raise PipelineError(
-            f"Unsupported transcriber '{transcriber}'. Use one of: auto, faster-whisper, whisper."
+            f"Unsupported transcriber '{transcriber}'. Use one of: auto, faster-whisper, whisper, whisper-cpp."
         )
 
 
@@ -568,10 +600,12 @@ def assemble_segments(segments: Iterable[GeneratedSegment], output_path: Path) -
 
     for seg in ordered:
         clip = AudioSegment.from_file(seg.audio_path, format="wav")
+        clip = clip.fade_in(50).fade_out(50)
         position_ms = int(seg.transcript.start * 1000)
         final_audio = final_audio.overlay(clip, position=position_ms)
 
-    final_audio.export(output_path, format="wav")
+    final_audio = normalize(final_audio)
+    final_audio.export(output_path, format="wav", bitrate="192k")
 
 
 def replace_audio_track(
@@ -614,8 +648,40 @@ def generate_segments(
 ) -> List[GeneratedSegment]:
     """Generate and time-stretch Chatterbox audio clips for each transcript segment."""
 
+    def split_long_segment(segment: TranscriptSegment, max_duration: float = 15.0) -> List[TranscriptSegment]:
+        if segment.duration <= max_duration:
+            return [segment]
+
+        words = segment.text.split()
+        if not words:
+            return [segment]
+
+        words_per_sec = max(len(words) / max(segment.duration, 1e-6), 1.0)
+        chunk_word_count = max(int(words_per_sec * max_duration), 1)
+
+        sub_segments: List[TranscriptSegment] = []
+        start = segment.start
+        idx = 0
+        while idx < len(words):
+            end = min(start + max_duration, segment.end)
+            chunk_words = words[idx : idx + chunk_word_count]
+            sub_segments.append(
+                TranscriptSegment(
+                    start=start,
+                    end=end,
+                    text=" ".join(chunk_words).strip(),
+                )
+            )
+            start = end
+            idx += chunk_word_count
+        return sub_segments
+
+    all_segments: List[TranscriptSegment] = []
+    for seg in segments:
+        all_segments.extend(split_long_segment(seg))
+
     generated: List[GeneratedSegment] = []
-    for index, segment in enumerate(segments):
+    for index, segment in enumerate(all_segments):
         raw_clip = workdir / f"segment_{index:04d}_raw.wav"
         stretched_clip = workdir / f"segment_{index:04d}_aligned.wav"
 
@@ -671,9 +737,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--transcriber",
-        choices=["auto", "faster-whisper", "whisper"],
+        choices=["auto", "faster-whisper", "whisper", "whisper-cpp", "whisper_cpp"],
         default=os.environ.get("TRANSCRIBER", "auto"),
-        help="Transcription backend. Default 'auto' tries faster-whisper then falls back to openai-whisper.",
+        help="Transcription backend. Default 'auto' tries faster-whisper, optional whisper.cpp, then openai-whisper.",
     )
     parser.add_argument(
         "--ct2-device",
@@ -691,6 +757,37 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=int,
         default=int(os.environ.get("WHISPER_CT2_BEAM", "5")),
         help="Beam size for faster-whisper decoding.",
+    )
+    parser.add_argument(
+        "--whisper-cpp-bin",
+        type=Path,
+        default=None,
+        help="Path to whisper.cpp binary (overrides WHISPER_CPP_BIN)",
+    )
+    parser.add_argument(
+        "--whisper-cpp-model",
+        type=Path,
+        default=None,
+        help="Path to whisper.cpp ggml model (overrides WHISPER_CPP_MODEL)",
+    )
+    parser.add_argument(
+        "--whisper-cpp-threads",
+        type=int,
+        default=None,
+        help="Thread count for whisper.cpp (overrides WHISPER_CPP_THREADS)",
+    )
+    parser.add_argument(
+        "--word-timestamps",
+        dest="word_timestamps",
+        action="store_true",
+        default=True,
+        help="Enable word-level timestamps when transcribing (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-word-timestamps",
+        dest="word_timestamps",
+        action="store_false",
+        help="Disable word-level timestamps (not recommended for long-form dubbing)",
     )
     parser.add_argument(
         "--transcript-json",
@@ -759,6 +856,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ct2_device=args.ct2_device,
                 ct2_compute=args.ct2_compute,
                 ct2_beam_size=args.ct2_beam_size,
+                word_timestamps=args.word_timestamps,
+                whisper_cpp_bin=args.whisper_cpp_bin,
+                whisper_cpp_model=args.whisper_cpp_model,
+                whisper_cpp_threads=args.whisper_cpp_threads,
+                language=args.language,
             )
         print(f"Transcribed {len(segments)} segments")
 

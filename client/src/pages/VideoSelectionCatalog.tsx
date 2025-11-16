@@ -35,6 +35,10 @@ interface TemplateVideo {
   tags: string[];
   difficulty: string;
   isActive: boolean;
+  metadata?: {
+    pipelineStatus?: string;
+    sourceVideoId?: string;
+  };
 }
 
 const categoryIconMap: Record<string, ComponentType<{ className?: string }>> = {
@@ -151,6 +155,12 @@ export default function VideoSelectionCatalog() {
 
   const handleSelectVideo = (video: TemplateVideo) => {
     setSelectedVideo(video);
+    if (video.metadata?.pipelineStatus !== "completed") {
+      toast({
+        title: "Transcript still processing",
+        description: "We will transcribe the audio during project processing.",
+      });
+    }
   };
 
   const handleCreateProject = () => {

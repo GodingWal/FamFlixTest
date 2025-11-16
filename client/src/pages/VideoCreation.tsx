@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation } from "wouter";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/hooks/useAuth";
@@ -56,11 +57,46 @@ export default function VideoCreation() {
     queryKey: ["/api/template-videos"],
     enabled: !isAdmin, // Only fetch for regular users
   });
+  useEffect(() => {
+    if (!selectedProvidedVideo) return;
+    const templateStillAvailable = Array.isArray(providedVideos)
+      ? providedVideos.some((video: any) => String(video.id) === String(selectedProvidedVideo))
+      : false;
+    if (!templateStillAvailable) {
+      setSelectedProvidedVideo(null);
+    }
+  }, [providedVideos, selectedProvidedVideo]);
 
   const { data: suggestions, isLoading: suggestionsLoading } = useQuery({
     queryKey: ["/api/videos/suggestions", form.watch("familyId")],
     enabled: !!form.watch("familyId"),
   });
+
+  const renderPipelineBadge = (video: any) => {
+    const status = video?.metadata?.pipelineStatus ?? 'queued';
+    switch (status) {
+      case 'completed':
+        return <Badge className="bg-green-500/10 text-green-600 border-green-500/20">Ready</Badge>;
+      case 'processing':
+      case 'queued':
+        return <Badge className="bg-amber-500/10 text-amber-600 border-amber-500/20">Processing</Badge>;
+      case 'error':
+        return <Badge variant="destructive">Needs attention</Badge>;
+      default:
+        return <Badge variant="outline">{status}</Badge>;
+    }
+  };
+
+  const handleVideoSelect = (video: any) => {
+    setSelectedProvidedVideo(String(video.id));
+    const status = video?.metadata?.pipelineStatus ?? 'queued';
+    if (status !== 'completed') {
+      toast({
+        title: 'Transcript still processing',
+        description: 'We will continue transcription during project processing.',
+      });
+    }
+  };
 
   const createVideoMutation = useMutation({
     mutationFn: async (data: VideoFormData & { video?: File }) => {
@@ -91,9 +127,15 @@ export default function VideoCreation() {
 
         return response.json();
       } else {
-        // User project creation (no file upload) against template videos
+        const selectedTemplate = Array.isArray(providedVideos)
+          ? providedVideos.find((video: any) => String(video.id) === String(selectedProvidedVideo))
+          : undefined;
+        if (!selectedTemplate) {
+          throw new Error("Please select a video template before creating a project.");
+        }
+
         const response = await apiRequest("POST", "/api/video-projects", {
-          templateVideoId: selectedProvidedVideo ? Number(selectedProvidedVideo) : undefined,
+          templateVideoId: selectedTemplate.id,
           status: "pending",
           metadata: data.description ? { description: data.description } : undefined,
         });
@@ -463,38 +505,42 @@ export default function VideoCreation() {
                           <Label>Select Video to Create Project</Label>
                           <div className="grid gap-4 mt-2">
                             {Array.isArray(providedVideos) && providedVideos.length > 0 ? (
-                              providedVideos.map((video: any) => (
-                                <Card 
-                                  key={video.id} 
-                                  className={`cursor-pointer transition-colors ${
-                                    selectedProvidedVideo === video.id 
-                                      ? 'ring-2 ring-primary bg-primary/5' 
-                                      : 'hover:bg-secondary/20'
-                                  }`}
-                                  onClick={() => setSelectedProvidedVideo(video.id)}
-                                  data-testid={`card-video-${video.id}`}
-                                >
-                                  <CardContent className="p-4">
-                                    <div className="flex items-center space-x-4">
-                                      <div className="w-16 h-16 bg-secondary rounded-lg flex items-center justify-center">
-                                        <i className="fas fa-video text-2xl text-muted-foreground"></i>
-                                      </div>
-                                      <div className="flex-1">
-                                        <h4 className="font-semibold">{video.title}</h4>
-                                        <p className="text-sm text-muted-foreground">{video.description}</p>
-                                        <p className="text-xs text-muted-foreground mt-1">
-                                          Duration: {video.duration ? `${Math.floor(video.duration / 60)}:${(video.duration % 60).toString().padStart(2, '0')}` : 'Unknown'}
-                                        </p>
-                                      </div>
-                                      {selectedProvidedVideo === video.id && (
-                                        <div className="text-primary">
-                                          <i className="fas fa-check-circle text-xl"></i>
+                              providedVideos.map((video: any) => {
+                                const isSelected = String(selectedProvidedVideo) === String(video.id);
+                                return (
+                                  <Card
+                                    key={video.id}
+                                    className={`cursor-pointer transition-colors ${
+                                      isSelected ? 'ring-2 ring-primary bg-primary/5' : 'hover:bg-secondary/20'
+                                    }`}
+                                    onClick={() => handleVideoSelect(video)}
+                                    data-testid={`card-video-${video.id}`}
+                                  >
+                                    <CardContent className="p-4 space-y-2">
+                                      <div className="flex items-center space-x-4">
+                                        <div className="w-16 h-16 bg-secondary rounded-lg flex items-center justify-center">
+                                          <i className="fas fa-video text-2xl text-muted-foreground"></i>
                                         </div>
-                                      )}
-                                    </div>
-                                  </CardContent>
-                                </Card>
-                              ))
+                                        <div className="flex-1 space-y-1">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <h4 className="font-semibold">{video.title}</h4>
+                                            {renderPipelineBadge(video)}
+                                          </div>
+                                          <p className="text-sm text-muted-foreground line-clamp-2">{video.description}</p>
+                                          <p className="text-xs text-muted-foreground">
+                                            Duration: {video.duration ? `${Math.floor(video.duration / 60)}:${(video.duration % 60).toString().padStart(2, '0')}` : 'Unknown'}
+                                          </p>
+                                        </div>
+                                        {isSelected && (
+                                          <div className="text-primary">
+                                            <i className="fas fa-check-circle text-xl"></i>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                );
+                              })
                             ) : (
                               <div className="text-center py-8 text-muted-foreground">
                                 <i className="fas fa-video text-4xl mb-4 block"></i>

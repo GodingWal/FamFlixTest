@@ -13,6 +13,7 @@ export const templateVideos = sqliteTable("template_videos", {
   tags: text("tags").notNull(), // JSON array of tags
   difficulty: text("difficulty").notNull(), // easy, medium, hard (for face replacement complexity)
   isActive: integer("is_active").notNull().default(1), // 1 = active, 0 = inactive
+  metadata: text("metadata"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });

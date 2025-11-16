@@ -2,27 +2,9 @@
 import 'dotenv/config';
 import { db } from './db.js';
 import { sql } from 'drizzle-orm';
+import { ensureTemplateVideosTable } from './utils/templateVideos.js';
 
 // Ensure template_videos table exists before seeding
-async function ensureTemplateVideosTable() {
-  await db.run(sql`
-    CREATE TABLE IF NOT EXISTS template_videos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      title TEXT NOT NULL,
-      description TEXT,
-      thumbnail_url TEXT,
-      video_url TEXT NOT NULL,
-      duration INTEGER,
-      category TEXT DEFAULT 'general',
-      tags TEXT DEFAULT '[]',
-      difficulty TEXT DEFAULT 'easy',
-      is_active INTEGER DEFAULT 1,
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
-    )
-  `);
-}
-
 const templateVideos = [
   {
     title: "Happy Birthday Celebration",
@@ -166,11 +148,12 @@ async function seed() {
       await db.run(sql`
         INSERT INTO template_videos (
           title, description, thumbnail_url, video_url, duration, 
-          category, tags, difficulty, is_active, created_at, updated_at
+          category, tags, difficulty, is_active, metadata, created_at, updated_at
         ) VALUES (
           ${video.title}, ${video.description}, ${video.thumbnailUrl}, 
           ${video.videoUrl}, ${video.duration}, ${video.category}, 
           ${video.tags}, ${video.difficulty}, ${video.isActive}, 
+          ${JSON.stringify({ pipelineStatus: "queued" })},
           ${video.createdAt.toISOString()}, ${video.updatedAt.toISOString()}
         )
       `);

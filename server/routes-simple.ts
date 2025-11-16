@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express, { type Request, Response, NextFunction, Express } from "express";
 import { createServer, type Server } from "http";
 import path from "path";
+import fs from "fs/promises";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import rateLimit from 'express-rate-limit';
@@ -24,12 +25,15 @@ import { voiceJobService } from "./services/voiceJobService";
 import { videoService } from "./services/videoService";
 import {
   insertUserSchema,
+  insertVideoSchema,
   subscriptionPlans,
   type SubscriptionPlan,
   type User,
   type InsertAdPreference,
 } from "@shared/schema-sqlite";
 import { billingService } from "./services/billingService";
+import { ensureTemplateVideosTable } from "./utils/templateVideos";
+import { adminVideoPipelineService } from "./services/adminVideoPipelineService";
 
 // Multer configuration for file uploads
 const upload = multer({
@@ -38,6 +42,37 @@ const upload = multer({
     fileSize: 50 * 1024 * 1024, // 50MB limit
   },
 });
+
+async function safeUnlink(filePath?: string | null) {
+  if (!filePath) return;
+  try {
+    await fs.unlink(filePath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") {
+      console.warn("[uploads] Failed to remove file", filePath, error);
+    }
+  }
+}
+
+function coerceMetadata(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? { ...parsed } : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  return {};
+}
+
+function sanitizeMetadata(value: Record<string, unknown>) {
+  return JSON.parse(JSON.stringify(value ?? {}));
+}
 
 // Validation schemas
 const loginSchema = z.object({
@@ -84,6 +119,7 @@ const serializeUser = (user: User) => ({
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  await ensureTemplateVideosTable();
   // Apply general rate limiting to all routes
   app.use('/api', generalRateLimit);
 
@@ -128,6 +164,83 @@ export async function registerRoutes(app: Express): Promise<Server> {
   if (process.env.FEATURE_STORY_MODE === 'true') {
     app.use(storiesRouter);
   }
+
+  app.post(
+    '/api/admin/videos',
+    authenticateToken,
+    upload.single('video'),
+    async (req: AuthRequest, res) => {
+      if (req.user?.role !== 'admin') {
+        return res.status(403).json({ error: 'Access denied. Admin privileges required.' });
+      }
+
+      let uploadedFilePath: string | null = null;
+      let createdVideoId: string | null = null;
+      try {
+        if (!req.file) {
+          return res.status(400).json({ error: "Video file is required" });
+        }
+
+        let videoData = insertVideoSchema.parse({
+          ...req.body,
+          createdBy: req.user!.id,
+        });
+
+        const processedVideo = await videoService.processVideoUpload(req.file);
+        uploadedFilePath = processedVideo.localPath;
+
+        const nowIso = new Date().toISOString();
+        const existingMeta = coerceMetadata(videoData.metadata);
+        const mergedMeta: Record<string, unknown> = {
+          ...existingMeta,
+          ...(processedVideo.metadata || {}),
+        };
+        const pipelineValue = mergedMeta["pipeline"];
+        const pipelineMeta =
+          pipelineValue && typeof pipelineValue === "object"
+            ? { ...(pipelineValue as Record<string, unknown>) }
+            : {};
+        pipelineMeta.status = "queued";
+        pipelineMeta.lastUpdatedAt = nowIso;
+
+        const combinedMetadata = sanitizeMetadata({
+          ...mergedMeta,
+          pipeline: pipelineMeta,
+        });
+
+        videoData = {
+          ...videoData,
+          status: "processing",
+          videoUrl: processedVideo.videoUrl,
+          thumbnail: processedVideo.thumbnail ?? videoData.thumbnail,
+          duration: processedVideo.duration ?? videoData.duration,
+          metadata: combinedMetadata,
+        };
+
+        const video = await storage.createAdminProvidedVideo(videoData);
+        createdVideoId = video.id;
+
+        try {
+          await adminVideoPipelineService.enqueue(video.id, video.videoUrl);
+        } catch (pipelineError) {
+          const err = pipelineError instanceof Error ? pipelineError : new Error("Failed to start processing pipeline");
+          (err as any).statusCode = 500;
+          throw err;
+        }
+
+        const refreshed = await storage.getVideo(video.id);
+        res.status(201).json(refreshed ?? video);
+      } catch (error: any) {
+        console.error('Admin create video error:', error);
+        if (createdVideoId) {
+          await storage.deleteVideo(createdVideoId);
+        }
+        await safeUnlink(uploadedFilePath);
+        res.status(error?.statusCode || 400).json({ error: error.message || "Failed to create admin video" });
+      }
+    }
+  );
+
   app.use('/api/admin', authenticateToken, adminRouter);
 
   // Serve audio files securely (previews and TTS generations)

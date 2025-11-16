@@ -27,11 +27,46 @@ from typing import Any
 import wave
 import math
 import struct
+import logging  # Optional debug logging
 
-try:
-    import numpy as np  # type: ignore
-except Exception:
-    np = None  # numpy is optional at import-time; we can still proceed if not present
+# Guard against local coverage reports shadowing the real `coverage` package
+# (Numba/librosa pull it in and will crash if the HTML report directory wins import resolution)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+COVERAGE_ARTIFACT = REPO_ROOT / "coverage"
+
+
+def _clean_sys_path_and_env(verbose: bool = False) -> None:
+    """Normalise sys.path and env so chatterbox/numba imports succeed in this repo."""
+    # Prefer this script's directory and drop the repo root / coverage artifact
+    this_dir = str(Path(__file__).parent)
+    sys.path = [
+        p
+        for p in sys.path
+        if p not in ("", str(REPO_ROOT), str(COVERAGE_ARTIFACT))
+    ]
+    if this_dir not in sys.path:
+        sys.path.insert(0, this_dir)
+
+    # If coverage was already imported from the HTML report, evict it
+    mod = sys.modules.get("coverage")
+    mod_file = getattr(mod, "__file__", "") if mod else ""
+    if mod and (mod_file.startswith(str(COVERAGE_ARTIFACT)) or mod_file.startswith(str(REPO_ROOT))):
+        sys.modules.pop("coverage", None)
+
+    # Numba caching can fail in sandboxed environments; disable it by default and
+    # ensure a writable cache dir exists if caching is later re-enabled.
+    os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
+    cache_dir = os.environ.get("NUMBA_CACHE_DIR")
+    if not cache_dir:
+        cache_dir = str((REPO_ROOT / "temp" / "numba-cache").resolve())
+        os.environ["NUMBA_CACHE_DIR"] = cache_dir
+    try:
+        Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    if verbose:
+        print(f"[chatterbox] Cleaned sys.path; Numba cache: {cache_dir}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,8 +98,18 @@ def main(argv: list[str] | None = None) -> int:
         default=int(os.environ.get("CHATTERBOX_MAX_NEW_TOKENS", "64")),
         help="Limit LLM token generation if model.generate() accepts it (e.g., max_new_tokens)",
     )
+    parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args(argv)
+
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s", stream=sys.stderr)
+        _clean_sys_path_and_env(verbose=True)
+    else:
+        _clean_sys_path_and_env()
+
+    torch = None
+    ta = None
 
     # Lightweight fallback: if heavy deps are missing, synthesize a simple beep WAV so dev can proceed
     try:
@@ -107,9 +152,9 @@ def main(argv: list[str] | None = None) -> int:
                 "note": "fallback_beep_audio"
             }), flush=True)
             return 0
-        except Exception:
+        except Exception as e:
             print(json.dumps({
-                "error": f"Missing dependencies: {exc}. Install with: pip install chatterbox-tts torch torchaudio"
+                "error": f"Missing dependencies: {exc}. Install with: pip install chatterbox-tts torch torchaudio. Fallback failed: {e}"
             }), file=sys.stdout, flush=True)
             return 2
 
@@ -117,6 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if device.startswith("cuda") and not torch.cuda.is_available():
             device = "cpu"
+            if args.verbose:
+                logging.info("Fallback to CPU: CUDA unavailable")
     except Exception:
         device = "cpu"
 
@@ -127,8 +174,11 @@ def main(argv: list[str] | None = None) -> int:
         _it = int(_os.environ.get("TORCH_NUM_INTEROP_THREADS", "1"))
         torch.set_num_threads(_nt)
         torch.set_num_interop_threads(_it)
-    except Exception:
-        pass
+        if args.verbose:
+            logging.debug(f"Set Torch threads: num={_nt}, interop={_it}")
+    except (ValueError, AttributeError) as e:
+        if args.verbose:
+            logging.warning(f"Thread tuning failed: {e}")
 
     # Load model, passing attention implementation to from_pretrained if supported
     pretrained_kwargs = {}
@@ -215,9 +265,7 @@ def main(argv: list[str] | None = None) -> int:
             # Convert to mono if needed
             if wav_in.dim() == 2 and wav_in.size(0) > 1:
                 wav_in = wav_in.mean(dim=0, keepdim=True)
-            target_sr = int(getattr(model, "sr", sr_in))
-            if target_sr <= 0:
-                target_sr = sr_in
+            target_sr = int(getattr(model, "sr", sr_in) or sr_in)
             if int(sr_in) != target_sr:
                 wav_in = TAF.resample(wav_in, int(sr_in), target_sr)
                 sr_in = target_sr
@@ -232,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             # If torchaudio cannot decode, fall back to raw path
             normalized_prompt_path = str(speaker_wav_path)
+            if args.verbose:
+                logging.warning(f"Prompt normalization failed, using raw path: {speaker_wav_path}")
 
     # Introspect generate() signature to pass only supported kwargs
     sig = inspect.signature(model.generate)
@@ -246,9 +296,9 @@ def main(argv: list[str] | None = None) -> int:
     base_kwargs = {"text": args.text}
     # Optional controls
     if "exaggeration" in param_names:
-        base_kwargs["exaggeration"] = args.exaggeration
+        base_kwargs["exaggeration"] = max(0.0, min(1.0, args.exaggeration))
     if "cfg_weight" in param_names:
-        base_kwargs["cfg_weight"] = args.cfg_weight
+        base_kwargs["cfg_weight"] = max(0.0, min(1.0, args.cfg_weight))
     if args.multilingual and args.language and "language" in param_names:
         base_kwargs["language"] = args.language
 
@@ -329,10 +379,16 @@ def main(argv: list[str] | None = None) -> int:
         try:
             out = model.generate(**kwargs)
             used_prompt_arg = prompt_key
+            if args.verbose:
+                logging.debug(f"Success with prompt_key={prompt_key} (type={type(value)})")
             return True, out, None
         except TypeError as te:
+            if args.verbose:
+                logging.debug(f"TypeError for {prompt_key}: {te}")
             return False, None, te
         except Exception as e:
+            if args.verbose:
+                logging.debug(f"Error for {prompt_key}: {e}")
             return False, None, e
 
     # 1) Try with path
@@ -364,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
         try:
             wav = model.generate(**base_kwargs)
             used_prompt_arg = None
+            if args.verbose:
+                logging.info("Generated without prompt")
         except Exception as e:
             last_err = e
 
@@ -400,7 +458,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             # Report the error and what we tried
             print(json.dumps({
-                "error": f"Chatterbox generate() failed: {last_err}",
+                "error": f"Chatterbox generate() failed: {last_err}. Fallback failed: {e}",
                 "tried": tried,
                 "accepted_params": sorted(param_names),
             }), file=sys.stdout, flush=True)
@@ -421,13 +479,21 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:  # pragma: no cover
             raise RuntimeError(f"torch not available to save audio: {e}")
 
+        # Lazy import numpy if available
+        np_local = None
+        try:
+            import numpy as _np  # type: ignore
+            np_local = _np
+        except Exception:
+            np_local = None
+
         if x is None:
             raise RuntimeError("generate() returned None")
 
         # Already a torch tensor
         if hasattr(x, "dim") and hasattr(x, "dtype"):
             t = x
-        elif np is not None and isinstance(x, np.ndarray):
+        elif np_local is not None and isinstance(x, np_local.ndarray):
             import torch as _torch  # noqa
             t = _torch.from_numpy(x)
         else:
@@ -482,7 +548,13 @@ def main(argv: list[str] | None = None) -> int:
             if getattr(info, "num_frames", 0) and getattr(info, "sample_rate", 0):
                 duration_sec = float(info.num_frames) / float(info.sample_rate)
         except Exception:
-            duration_sec = None
+            # Fallback estimation if ta.info fails
+            if isinstance(wav, (tuple, list)) and len(wav) >= 2:
+                audio_len = len(wav[0]) if hasattr(wav[0], "__len__") else 0
+                duration_sec = audio_len / sr if audio_len > 0 else None
+            else:
+                text_len = max(1, len(args.text.strip()))
+                duration_sec = max(1.5, min(12.0, 0.02 * text_len))
     except Exception as e:
         print(json.dumps({
             "error": f"Failed to persist audio: {e}",

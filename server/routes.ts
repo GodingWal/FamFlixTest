@@ -5,6 +5,7 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import multer from "multer";
 import path from "path";
+import fs from "fs/promises";
 import { z } from "zod";
 import { storage } from "./storage";
 import { 
@@ -40,6 +41,8 @@ import { emailService } from "./services/emailService";
 import { storyService } from "./services/storyService";
 import storiesRouter from "./routes/stories";
 import storiesAdminRouter from "./routes/stories-admin";
+import { adminVideoPipelineService } from "./services/adminVideoPipelineService";
+import { ensureTemplateVideosTable } from "./utils/templateVideos";
 import {
   insertUserSchema,
   insertFamilySchema,
@@ -59,6 +62,37 @@ const upload = multer({
     fileSize: 50 * 1024 * 1024, // 50MB limit
   },
 });
+
+async function safeUnlink(filePath?: string | null) {
+  if (!filePath) return;
+  try {
+    await fs.unlink(filePath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") {
+      console.warn("[uploads] Failed to remove file", filePath, error);
+    }
+  }
+}
+
+function coerceMetadata(value: unknown): Record<string, unknown> {
+  if (!value) return {};
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? { ...parsed } : {};
+    } catch {
+      return {};
+    }
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  return {};
+}
+
+function sanitizeMetadata(value: Record<string, unknown>) {
+  return JSON.parse(JSON.stringify(value ?? {}));
+}
 
 // Validation schemas
 const loginSchema = z.object({
@@ -149,6 +183,7 @@ const serializeUser = (user: User) => ({
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
+  await ensureTemplateVideosTable();
   // Apply API rate limiting
   app.use('/api', apiRateLimit);
   if (config.FEATURE_STORY_MODE) {
@@ -810,29 +845,69 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // Admin-only route to upload video assets
   app.post('/api/admin/videos', authenticateToken, requireRole(['admin']), upload.single('video'), async (req: AuthRequest, res) => {
+    let uploadedFilePath: string | null = null;
+    let createdVideoId: string | null = null;
     try {
+      if (!req.file) {
+        return res.status(400).json({ error: "Video file is required" });
+      }
+
       let videoData = insertVideoSchema.parse({
         ...req.body,
         createdBy: req.user!.id,
       });
 
-      // Process video upload if file provided
-      if (req.file) {
-        const processedVideo = await videoService.processVideoUpload(req.file.buffer, req.body);
-        videoData = {
-          ...videoData,
-          videoUrl: processedVideo.videoUrl,
-          thumbnail: processedVideo.thumbnail,
-          duration: processedVideo.duration,
-          metadata: processedVideo.metadata,
-        };
-      }
+      const processedVideo = await videoService.processVideoUpload(req.file);
+      uploadedFilePath = processedVideo.localPath;
+
+      const nowIso = new Date().toISOString();
+      const existingMeta = coerceMetadata(videoData.metadata);
+      const mergedMeta: Record<string, unknown> = {
+        ...existingMeta,
+        ...(processedVideo.metadata || {}),
+      };
+      const pipelineValue = mergedMeta["pipeline"];
+      const pipelineMeta =
+        pipelineValue && typeof pipelineValue === "object"
+          ? { ...(pipelineValue as Record<string, unknown>) }
+          : {};
+      pipelineMeta.status = "queued";
+      pipelineMeta.lastUpdatedAt = nowIso;
+
+      const combinedMetadata = sanitizeMetadata({
+        ...mergedMeta,
+        pipeline: pipelineMeta,
+      });
+
+      videoData = {
+        ...videoData,
+        status: "processing",
+        videoUrl: processedVideo.videoUrl,
+        thumbnail: processedVideo.thumbnail ?? videoData.thumbnail,
+        duration: processedVideo.duration ?? videoData.duration,
+        metadata: combinedMetadata,
+      };
 
       const video = await storage.createAdminProvidedVideo(videoData);
-      res.status(201).json(video);
+      createdVideoId = video.id;
+
+      try {
+        await adminVideoPipelineService.enqueue(video.id, video.videoUrl);
+      } catch (pipelineError) {
+        const err = pipelineError instanceof Error ? pipelineError : new Error("Failed to start processing pipeline");
+        (err as any).statusCode = 500;
+        throw err;
+      }
+
+      const refreshed = await storage.getVideo(video.id);
+      res.status(201).json(refreshed ?? video);
     } catch (error: any) {
       console.error('Admin create video error:', error);
-      res.status(400).json({ error: error.message || "Failed to create admin video" });
+      if (createdVideoId) {
+        await storage.deleteVideo(createdVideoId);
+      }
+      await safeUnlink(uploadedFilePath);
+      res.status(error?.statusCode || 400).json({ error: error.message || "Failed to create admin video" });
     }
   });
 

@@ -28,3 +28,7 @@ coverage/
 # IDE settings
 .vscode/
 .idea/
+
+# Python caches
+__pycache__/
+*.py[cod]
