@@ -135,14 +135,38 @@ async function runVoiceReplacementPipeline(
     args.push('--ct2-beam-size', ct2Beam);
   }
 
+  const timeoutMs = Number(process.env.VOICE_PIPELINE_TIMEOUT_MS || 10 * 60 * 1000); // default 10 minutes
+  let timedOut = false;
+
   await new Promise<void>((resolve, reject) => {
     const proc = spawn(pythonBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
-    proc.on('error', (e: Error) => reject(e));
+    let stdout = '';
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+    }, timeoutMs);
+
+    proc.stdout.on('data', (d: Buffer) => {
+      const msg = d.toString();
+      stdout += msg;
+      console.log('[processing][pipeline stdout]', msg.trim());
+    });
+    proc.stderr.on('data', (d: Buffer) => {
+      const msg = d.toString();
+      stderr += msg;
+      console.error('[processing][pipeline stderr]', msg.trim());
+    });
+    proc.on('error', (e: Error) => {
+      clearTimeout(timer);
+      reject(e);
+    });
     proc.on('close', (code: number | null) => {
+      clearTimeout(timer);
       if (code === 0) return resolve();
-      reject(new Error(`voice_replace_pipeline exited with code ${code}: ${stderr}`));
+      const reason = timedOut ? `timed out after ${timeoutMs}ms` : `exited with code ${code}`;
+      reject(new Error(`voice_replace_pipeline ${reason}: ${stderr || stdout || 'no output'}`));
     });
   });
 }
