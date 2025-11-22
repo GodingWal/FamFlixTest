@@ -213,6 +213,16 @@ const formatMinutes = (minutes: number | null | undefined) => {
   return `${Math.round(hours)} hours`;
 };
 
+const CATEGORY_ICONS: Record<string, string> = {
+  BEDTIME: "🌙",
+  CLASSIC: "📚",
+  FAIRYTALE: "🏰",
+  ADVENTURE: "🚀",
+  EDUCATIONAL: "🎓",
+  CUSTOM: "✨",
+  UNCATEGORIZED: "📖",
+};
+
 export default function Stories() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
@@ -487,7 +497,7 @@ export default function Stories() {
           description: "We found completed sections for this story and voice.",
         });
         queryClient.invalidateQueries({
-          queryKey: ["story-audio", data.story.slug, selectedVoiceProfile],
+          queryKey: ["story-audio", data.story?.slug, selectedVoiceProfile],
         });
         setActiveJob(null);
         setJobStatus(null);
@@ -725,50 +735,69 @@ export default function Stories() {
                     {filteredStories.map((story) => {
                       const durationLabel = formatMinutes(story.durationMin);
                       const isSelected = story.slug === selectedSlug;
+                      const icon = CATEGORY_ICONS[story.category?.toUpperCase()] || CATEGORY_ICONS.UNCATEGORIZED;
+
                       return (
                         <button
                           type="button"
                           key={story.id}
                           onClick={() => setSelectedSlug(story.slug)}
                           className={cn(
-                            "w-full rounded-xl border border-border bg-card p-4 text-left transition hover:bg-secondary/30",
-                            isSelected && "ring-1 ring-primary/60",
-                            "hover:shadow-lg hover:border-primary/30"
+                            "w-full rounded-xl border bg-card p-3 text-left transition-all hover:bg-accent/5",
+                            isSelected
+                              ? "border-primary ring-1 ring-primary shadow-md bg-accent/5"
+                              : "border-border hover:border-primary/50 hover:shadow-sm"
                           )}
                         >
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <h3 className="text-lg font-semibold text-foreground">
-                                {story.title}
-                              </h3>
-                              <Badge variant="secondary" className="bg-secondary text-secondary-foreground">
-                                {story.category || "UNCATEGORIZED"}
-                              </Badge>
-                            </div>
-                            {story.summary ? (
-                              <p className="text-sm text-muted-foreground line-clamp-3">
-                                {story.summary}
-                              </p>
-                            ) : null}
-                            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                              {durationLabel && <span>{durationLabel}</span>}
-                              {story.ageRange?.min !== null ||
-                              story.ageRange?.max !== null ? (
-                                <span>
-                                  Ages{" "}
-                                  {story.ageRange.min ?? "?"}-
-                                  {story.ageRange.max ?? "?"}
-                                </span>
+                          <div className="flex gap-4">
+                            <div className="h-24 w-24 flex-shrink-0 overflow-hidden rounded-lg bg-muted border border-border/50">
+                              {story.coverUrl ? (
+                                <img
+                                  src={story.coverUrl}
+                                  alt={story.title}
+                                  className="h-full w-full object-cover transition-transform hover:scale-105"
+                                  onError={(e) => {
+                                    e.currentTarget.style.display = 'none';
+                                    e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                                  }}
+                                />
                               ) : null}
-                              {story.tags.slice(0, 3).map((tag) => (
-                                <Badge
-                                  key={tag}
-                                  variant="outline"
-                                  className="border-border bg-secondary text-secondary-foreground"
-                                >
-                                  #{tag}
+                              <div className={cn(
+                                "flex h-full w-full items-center justify-center bg-gradient-to-br from-primary/10 to-secondary/10 text-3xl",
+                                story.coverUrl ? "hidden" : ""
+                              )}>
+                                {icon}
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col gap-1 min-w-0 flex-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <h3 className="text-base font-semibold text-foreground line-clamp-1">
+                                  {story.title}
+                                </h3>
+                                <Badge variant="secondary" className="bg-secondary/50 text-xs px-1.5 py-0 h-5 whitespace-nowrap">
+                                  {story.category || "Story"}
                                 </Badge>
-                              ))}
+                              </div>
+
+                              {story.summary && (
+                                <p className="text-xs text-muted-foreground line-clamp-2 leading-relaxed">
+                                  {story.summary}
+                                </p>
+                              )}
+
+                              <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground font-medium">
+                                {durationLabel && (
+                                  <span className="flex items-center gap-1">
+                                    <i className="far fa-clock" /> {durationLabel}
+                                  </span>
+                                )}
+                                {(story.ageRange?.min !== null || story.ageRange?.max !== null) && (
+                                  <span className="flex items-center gap-1">
+                                    <i className="fas fa-child" /> Ages {story.ageRange.min ?? "?"}-{story.ageRange.max ?? "?"}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
                         </button>
@@ -922,6 +951,7 @@ export default function Stories() {
 
                           <Button
                             onClick={() => handleNarrate(false)}
+                            className="bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 hover:from-indigo-600 hover:via-purple-600 hover:to-pink-600 text-white border-0 shadow-lg hover:shadow-xl transition-all duration-300"
                             disabled={Boolean(
                               !selectedVoiceProfile ||
                               voicesLoading ||
@@ -936,7 +966,7 @@ export default function Stories() {
                                 Generating narration...
                               </span>
                             ) : (
-                              <span className="flex items-center gap-2">
+                              <span className="flex items-center gap-2 font-semibold">
                                 <i className="fas fa-magic" />
                                 Read with{" "}
                                 {(selectedVoice?.displayName ?? selectedVoice?.name) ||
@@ -1004,7 +1034,7 @@ export default function Stories() {
 
                           <div className="space-y-4">
                             <h3 className="text-lg font-semibold text-foreground">
-                              Sections &amp; audio
+                              {mergedSections.length > 1 ? "Sections & audio" : "Story Narration"}
                             </h3>
                             {mergedSections.length === 0 ? (
                               <p className="text-sm text-slate-300">
@@ -1025,10 +1055,12 @@ export default function Stories() {
                                     >
                                       <div className="flex flex-wrap items-center justify-between gap-3">
                                         <div>
-                                          <p className="text-sm font-semibold text-foreground">
-                                            Section {index + 1}
-                                            {section.title ? ` · ${section.title}` : ""}
-                                          </p>
+                                          {mergedSections.length > 1 && (
+                                            <p className="text-sm font-semibold text-foreground">
+                                              Section {index + 1}
+                                              {section.title ? ` · ${section.title}` : ""}
+                                            </p>
+                                          )}
                                           <p className="text-xs text-muted-foreground">
                                             Words: {section.wordCount}
                                           </p>
@@ -1062,7 +1094,7 @@ export default function Stories() {
                                                 selectedVoiceProfile ?? ''
                                               )}`}
                                             >
-                                              <i className="fas fa-download mr-2" /> Download Section
+                                              <i className="fas fa-download mr-2" /> Download Audio
                                             </a>
                                           </Button>
                                         </div>

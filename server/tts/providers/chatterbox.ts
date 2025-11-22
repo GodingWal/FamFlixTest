@@ -62,6 +62,18 @@ export class ChatterboxProvider implements ITTSProvider {
     if (typeof config.CHATTERBOX_CFG_WEIGHT === "number") {
       args.push("--cfg-weight", String(config.CHATTERBOX_CFG_WEIGHT));
     }
+    if (typeof config.CHATTERBOX_STEPS === "number") {
+      args.push("--steps", String(config.CHATTERBOX_STEPS));
+    }
+
+    // Dynamic max_new_tokens based on text length to avoid hanging on CPU
+    // Rough estimate: 1 token ~ 4 chars. We give plenty of buffer (1 token per char) but cap it.
+    // Minimum 50 tokens (for very short text), Maximum 256 (or config limit).
+    const estimatedTokens = Math.max(50, Math.ceil(text.length));
+    const configMax = typeof config.CHATTERBOX_MAX_NEW_TOKENS === "number" ? config.CHATTERBOX_MAX_NEW_TOKENS : 256;
+    const maxTokens = Math.min(configMax, estimatedTokens);
+
+    args.push("--max-new-tokens", String(maxTokens));
 
     const stdout = await this.runPython(args);
 
@@ -142,13 +154,39 @@ export class ChatterboxProvider implements ITTSProvider {
 
   private runPython(args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
+      console.log(`[Chatterbox] Executing: ${this.pythonBin} ${args.join(" ")}`);
       const proc = spawn(this.pythonBin, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+      // Set a timeout (e.g., 10 minutes) to prevent indefinite hangs
+      const timeoutMs = 600000;
+      const timeout = setTimeout(() => {
+        console.error(`[Chatterbox] Process timed out after ${timeoutMs}ms. Killing...`);
+        proc.kill("SIGKILL");
+        reject(new Error("Chatterbox process timed out"));
+      }, timeoutMs);
+
       let out = "";
       let err = "";
       proc.stdout.on("data", (d: Buffer) => { out += d.toString(); });
       proc.stderr.on("data", (d: Buffer) => { err += d.toString(); });
-      proc.on("error", (e: Error) => reject(e));
+      proc.on("error", (e: Error) => {
+        clearTimeout(timeout);
+        console.error("[Chatterbox] Process error:", e);
+        reject(e);
+      });
       proc.on("close", (code: number | null) => {
+        clearTimeout(timeout);
+        if (code !== 0) {
+          console.error(`[Chatterbox] Failed with code ${code}. Stderr: ${err}`);
+          console.error(`[Chatterbox] Stdout: ${out}`);
+        } else {
+          if (err) console.log(`[Chatterbox] Stderr (warning?): ${err}`);
+          // Check for fallback beep in output
+          if (out.includes("fallback_beep_audio")) {
+            console.error("[Chatterbox] WARNING: Script reported success but fell back to beep audio!");
+            console.error(`[Chatterbox] Stderr: ${err}`);
+          }
+        }
         if (code === 0) return resolve(out);
         reject(new Error(`Chatterbox process exited with code ${code}: ${err || out}`));
       });
